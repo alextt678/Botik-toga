@@ -37,7 +37,7 @@ class PostStates(StatesGroup):
     waiting_livery_glass_file = State()
     collecting_sticker_photo = State()
     waiting_sticker_file = State()
-    confirm_post = State()  # Новое состояние для подтверждения
+    confirm_post = State()
 
 # ==================== БАЗА ДАННЫХ ====================
 DB_FILE = "posts.json"
@@ -198,13 +198,6 @@ async def check_bot_in_channel(channel_id: str) -> bool:
 def is_txt_file(file_name: str) -> bool:
     return file_name and file_name.lower().endswith('.txt')
 
-def is_audio_file(file_name: str = None) -> bool:
-    """Проверяет, является ли файл аудио"""
-    if not file_name:
-        return False
-    audio_extensions = ['.mp3', '.m4a', '.ogg', '.wav', '.flac']
-    return any(file_name.lower().endswith(ext) for ext in audio_extensions)
-
 # ==================== ФУНКЦИИ АВТОУДАЛЕНИЯ ====================
 
 async def delete_message_after(chat_id: int, message_id: int, seconds: int = 10):
@@ -216,6 +209,7 @@ async def delete_message_after(chat_id: int, message_id: int, seconds: int = 10)
 
 # ==================== ВРЕМЕННОЕ ХРАНИЛИЩЕ ====================
 temp_data = {}
+temp_channel_add = {}
 
 # ==================== КЛАВИАТУРЫ ====================
 
@@ -354,7 +348,6 @@ def get_new_post_keyboard() -> InlineKeyboardMarkup:
 async def cancel_post(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     
-    # Очищаем временные данные
     if user_id in temp_data:
         if temp_data[user_id].get('msg_id'):
             try:
@@ -363,13 +356,17 @@ async def cancel_post(callback: CallbackQuery, state: FSMContext):
                 pass
         del temp_data[user_id]
     
-    # Сбрасываем состояние
     await state.clear()
     
-    await callback.message.edit_text(
-        "❌ Создание поста отменено. Можешь начать заново 👇",
-        reply_markup=get_start_keyboard(False)
+    # Отправляем приветственное сообщение с кнопками
+    text = (
+        "👋 Привет! Что хочешь отправить?\n\n"
+        "📤 Обычный пост - фото/видео\n"
+        "👕 Ливрея - фото + 2 файла (.txt) на кузов и стекло\n"
+        "🏷️ Наклейка - фото + 1 файл (.txt)\n\n"
+        "⚠️ Файлы должны быть в формате .txt"
     )
+    await callback.message.edit_text(text, reply_markup=get_start_keyboard(False))
     await callback.answer()
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
@@ -390,7 +387,7 @@ async def cmd_start(message: types.Message):
     else:
         text = (
             "👋 Привет! Что хочешь отправить?\n\n"
-            "📤 Обычный пост - фото/видео/музыка\n"
+            "📤 Обычный пост - фото/видео\n"
             "👕 Ливрея - фото + 2 файла (.txt) на кузов и стекло\n"
             "🏷️ Наклейка - фото + 1 файл (.txt)\n\n"
             "⚠️ Файлы должны быть в формате .txt"
@@ -443,10 +440,6 @@ async def add_channel_start(callback: CallbackQuery):
             .as_markup()
     )
     await callback.answer()
-
-# ==================== ОБРАБОТЧИКИ ТЕКСТА ====================
-
-temp_channel_add = {}
 
 @dp.message(F.text)
 async def handle_channel_input(message: types.Message):
@@ -647,7 +640,6 @@ async def new_regular(callback: CallbackQuery, state: FSMContext):
     temp_data[callback.from_user.id] = {
         'photos': [], 
         'videos': [], 
-        'audios': [],
         'type': 'regular'
     }
     
@@ -657,7 +649,7 @@ async def new_regular(callback: CallbackQuery, state: FSMContext):
         pass
     
     msg = await callback.message.answer(
-        "📤 Отправляй фото, видео или музыку\n"
+        "📤 Отправляй фото или видео\n"
         "Можно отправить несколько файлов одним сообщением\n"
         "Когда закончишь - нажми кнопку",
         reply_markup=get_content_keyboard()
@@ -728,7 +720,7 @@ async def new_sticker(callback: CallbackQuery, state: FSMContext):
 
 # ==================== СБОР МЕДИА ====================
 
-@dp.message(PostStates.collecting_media, F.photo | F.video | F.audio | F.document)
+@dp.message(PostStates.collecting_media, F.photo | F.video)
 async def collect_regular_media(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
@@ -738,36 +730,17 @@ async def collect_regular_media(message: types.Message, state: FSMContext):
     
     added = False
     
-    # Фото
     if message.photo:
         photo = message.photo[-1]
         temp_data[user_id]['photos'].append(photo.file_id)
         added = True
     
-    # Видео
     elif message.video:
         temp_data[user_id]['videos'].append(message.video.file_id)
         added = True
     
-    # Аудио (как audio)
-    elif message.audio:
-        temp_data[user_id]['audios'].append(message.audio.file_id)
-        added = True
-    
-    # Файлы (могут быть аудио в документе)
-    elif message.document:
-        file_name = message.document.file_name or ""
-        if is_audio_file(file_name):
-            temp_data[user_id]['audios'].append(message.document.file_id)
-            added = True
-        else:
-            await message.reply("❌ Обычный пост принимает только фото, видео или музыку")
-            return
-    
     if added:
-        total = (len(temp_data[user_id]['photos']) + 
-                len(temp_data[user_id]['videos']) + 
-                len(temp_data[user_id]['audios']))
+        total = len(temp_data[user_id]['photos']) + len(temp_data[user_id]['videos'])
         reply_msg = await message.reply(f"✅ Добавлено ({total})")
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
@@ -777,9 +750,7 @@ async def collect_regular_media(message: types.Message, state: FSMContext):
         except:
             pass
     
-    total = (len(temp_data[user_id]['photos']) + 
-            len(temp_data[user_id]['videos']) + 
-            len(temp_data[user_id]['audios']))
+    total = len(temp_data[user_id]['photos']) + len(temp_data[user_id]['videos'])
     
     msg = await message.answer(
         f"📦 Собрано: {total} файлов\n"
@@ -855,29 +826,22 @@ async def content_done(callback: CallbackQuery, state: FSMContext):
     
     data = temp_data[user_id]
     
-    # Проверка для обычного поста
     if current_state == PostStates.collecting_media.state:
-        total = (len(data.get('photos', [])) + 
-                len(data.get('videos', [])) + 
-                len(data.get('audios', [])))
+        total = len(data.get('photos', [])) + len(data.get('videos', []))
         if total == 0:
             await callback.answer("❌ Сначала отправь файлы", show_alert=True)
             return
         
-        # Показываем подтверждение
         text = "📋 *Проверь содержимое:*\n\n"
         if data.get('photos'):
             text += f"📸 Фото: {len(data['photos'])}\n"
         if data.get('videos'):
             text += f"🎥 Видео: {len(data['videos'])}\n"
-        if data.get('audios'):
-            text += f"🎵 Музыка: {len(data['audios'])}\n"
         text += "\nВсё верно?"
         
         await state.set_state(PostStates.confirm_post)
         await callback.message.edit_text(text, parse_mode='Markdown', reply_markup=get_confirm_keyboard())
     
-    # Для ливреи
     elif current_state == PostStates.collecting_livery_photo.state:
         if not data.get('photos'):
             await callback.answer("❌ Сначала отправь фото", show_alert=True)
@@ -889,7 +853,6 @@ async def content_done(callback: CallbackQuery, state: FSMContext):
             reply_markup=get_cancel_keyboard()
         )
     
-    # Для наклейки
     elif current_state == PostStates.collecting_sticker_photo.state:
         if not data.get('photos'):
             await callback.answer("❌ Сначала отправь фото", show_alert=True)
@@ -917,14 +880,11 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext):
     data = temp_data[user_id]
     username = callback.from_user.username or f"id{user_id}"
     
-    # Формируем контент в зависимости от типа
     if data['type'] == 'regular':
         content = {
             'type': 'regular',
             'photos': data.get('photos', []),
-            'videos': data.get('videos', []),
-            'audios': data.get('audios', []),
-            'caption': None
+            'videos': data.get('videos', [])
         }
     elif data['type'] == 'livery':
         content = {
@@ -958,16 +918,13 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext):
     del temp_data[user_id]
     await state.clear()
     
-    # Отправляем подтверждение
     post_type_text = {
         'regular': 'Обычный пост',
         'livery': 'Ливрея',
         'sticker': 'Наклейка'
     }.get(data['type'], 'Пост')
     
-    await callback.message.edit_text(
-        f"✅ {post_type_text} отправлен на проверку!"
-    )
+    await callback.message.edit_text(f"✅ {post_type_text} отправлен на проверку!")
 
 @dp.callback_query(F.data == "confirm_redo")
 async def confirm_redo(callback: CallbackQuery, state: FSMContext):
@@ -978,28 +935,33 @@ async def confirm_redo(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
     
-    # Очищаем только контент, но оставляем тип поста
     data = temp_data[user_id]
     
     if data['type'] == 'regular':
         data['photos'] = []
         data['videos'] = []
-        data['audios'] = []
         await state.set_state(PostStates.collecting_media)
+        await callback.message.edit_text(
+            "📤 Отправляй фото или видео заново:",
+            reply_markup=get_content_keyboard()
+        )
     elif data['type'] == 'livery':
         data['photos'] = []
         data['body_file'] = None
         data['glass_file'] = None
         await state.set_state(PostStates.collecting_livery_photo)
+        await callback.message.edit_text(
+            "👕 Отправь фото ливреи заново:",
+            reply_markup=get_content_keyboard()
+        )
     elif data['type'] == 'sticker':
         data['photos'] = []
         data['sticker_file'] = None
         await state.set_state(PostStates.collecting_sticker_photo)
-    
-    await callback.message.edit_text(
-        "🔄 Хорошо, давай заново. Отправляй файлы:",
-        reply_markup=get_content_keyboard()
-    )
+        await callback.message.edit_text(
+            "🏷️ Отправь фото наклейки заново:",
+            reply_markup=get_content_keyboard()
+        )
 
 # ==================== СБОР ФАЙЛОВ ДЛЯ ЛИВРЕИ ====================
 
@@ -1046,7 +1008,6 @@ async def get_livery_glass_file(message: types.Message, state: FSMContext):
         'file_name': file_name
     }
     
-    # Показываем подтверждение для ливреи
     data = temp_data[user_id]
     text = "📋 *Проверь содержимое ливреи:*\n\n"
     text += f"📸 Фото: {len(data['photos'])}\n"
@@ -1077,7 +1038,6 @@ async def get_sticker_file(message: types.Message, state: FSMContext):
         'file_name': file_name
     }
     
-    # Показываем подтверждение для наклейки
     data = temp_data[user_id]
     text = "📋 *Проверь содержимое наклейки:*\n\n"
     text += f"📸 Фото: {len(data['photos'])}\n"
@@ -1093,7 +1053,7 @@ async def send_new_post_button(user_id: int):
     try:
         await bot.send_message(
             user_id,
-            "✨ Твой пост обработан! Можешь отправить новый 👇",
+            "✨ Твой пост обработан! Что хочешь отправить? 👇",
             reply_markup=get_new_post_keyboard()
         )
     except Exception as e:
@@ -1111,7 +1071,6 @@ async def send_to_admin(post_id: int, content: Dict, username: str):
         'sticker': '🏷️ Наклейка'
     }.get(content['type'], '📌 Пост')
     
-    # Отправляем фото
     for photo_id in content.get('photos', []):
         await bot.send_photo(
             ADMIN_ID,
@@ -1119,7 +1078,6 @@ async def send_to_admin(post_id: int, content: Dict, username: str):
             caption=f"{post_type_text} #{post_id} от @{username}{channel_text}"
         )
     
-    # Отправляем видео
     for video_id in content.get('videos', []):
         await bot.send_video(
             ADMIN_ID,
@@ -1127,15 +1085,6 @@ async def send_to_admin(post_id: int, content: Dict, username: str):
             caption=f"{post_type_text} #{post_id} от @{username}{channel_text}"
         )
     
-    # Отправляем аудио
-    for audio_id in content.get('audios', []):
-        await bot.send_audio(
-            ADMIN_ID,
-            audio_id,
-            caption=f"🎵 Отправил трек: @{username}{channel_text}"
-        )
-    
-    # Отправляем файлы для ливреи/наклейки
     if content['type'] == 'livery':
         if content['files'].get('body'):
             await bot.send_document(
@@ -1175,25 +1124,17 @@ async def publish_post(post: Dict):
     try:
         content = post['content']
         
-        # Отправляем фото
         for photo_id in content.get('photos', []):
             await bot.send_photo(channel_id, photo_id)
         
-        # Отправляем видео
         for video_id in content.get('videos', []):
             await bot.send_video(channel_id, video_id)
         
-        # Отправляем аудио
-        for audio_id in content.get('audios', []):
-            await bot.send_audio(channel_id, audio_id)
-        
-        # Отправляем подпись с автором
         await bot.send_message(
             channel_id,
             f"✍️ Автор: @{post['username']}"
         )
         
-        # Отправляем файлы для ливреи/наклейки
         if content['type'] == 'livery':
             if content['files'].get('body'):
                 await bot.send_document(
@@ -1269,12 +1210,9 @@ async def show_queue(callback: CallbackQuery):
             'sticker': '🏷️'
         }.get(p['content']['type'], '📌')
         
-        # Считаем общее количество файлов
         file_count = 0
         if p['content']['type'] == 'regular':
-            file_count = (len(p['content'].get('photos', [])) + 
-                         len(p['content'].get('videos', [])) + 
-                         len(p['content'].get('audios', [])))
+            file_count = len(p['content'].get('photos', [])) + len(p['content'].get('videos', []))
         else:
             file_count = len(p['content'].get('photos', [])) + 1
         
@@ -1331,8 +1269,6 @@ async def show_post_detail(callback: CallbackQuery, post_id: int):
             text += f"📸 Фото: {len(post['content']['photos'])}\n"
         if post['content'].get('videos'):
             text += f"🎥 Видео: {len(post['content']['videos'])}\n"
-        if post['content'].get('audios'):
-            text += f"🎵 Музыка: {len(post['content']['audios'])}\n"
     elif post['content']['type'] == 'livery':
         text += f"📸 Фото: {len(post['content']['photos'])}\n"
         text += "📁 Кузов: +1 файл\n📁 Стекло: +1 файл"
@@ -1344,36 +1280,18 @@ async def show_post_detail(callback: CallbackQuery, post_id: int):
     
     await callback.message.delete()
     
-    # Показываем первый файл как превью
-    if post['content']['type'] == 'regular':
-        if post['content'].get('photos'):
-            await bot.send_photo(
-                callback.from_user.id,
-                post['content']['photos'][0],
-                caption=text,
-                parse_mode='Markdown',
-                reply_markup=get_post_navigation_keyboard(post_id, total, post)
-            )
-        elif post['content'].get('videos'):
-            await bot.send_video(
-                callback.from_user.id,
-                post['content']['videos'][0],
-                caption=text,
-                parse_mode='Markdown',
-                reply_markup=get_post_navigation_keyboard(post_id, total, post)
-            )
-        elif post['content'].get('audios'):
-            await bot.send_audio(
-                callback.from_user.id,
-                post['content']['audios'][0],
-                caption=text,
-                parse_mode='Markdown',
-                reply_markup=get_post_navigation_keyboard(post_id, total, post)
-            )
-    elif post['content'].get('photos'):
+    if post['content'].get('photos'):
         await bot.send_photo(
             callback.from_user.id,
             post['content']['photos'][0],
+            caption=text,
+            parse_mode='Markdown',
+            reply_markup=get_post_navigation_keyboard(post_id, total, post)
+        )
+    elif post['content'].get('videos'):
+        await bot.send_video(
+            callback.from_user.id,
+            post['content']['videos'][0],
             caption=text,
             parse_mode='Markdown',
             reply_markup=get_post_navigation_keyboard(post_id, total, post)
