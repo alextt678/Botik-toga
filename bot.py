@@ -51,21 +51,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
-
-# ==================== СОСТОЯНИЯ ДЛЯ FSM ====================
-class PostStates(StatesGroup):
-    choosing_type = State()
-    collecting_media = State()
-    collecting_livery_photo = State()
-    waiting_livery_body_file = State()
-    waiting_livery_glass_file = State()
-    collecting_sticker_photo = State()
-    waiting_sticker_file = State()
-    confirm_post = State()
-
 # ==================== БАЗА ДАННЫХ ====================
 DB_FILE = "posts.json"
 CHANNELS_FILE = "channels.json"
@@ -80,7 +65,12 @@ class Database:
         self.current_channel: Optional[str] = None
         self.last_save = datetime.now()
         self.load()
+        # УБИРАЕМ create_task отсюда - он вызовет ошибку до запуска event loop
+    
+    def start_auto_save(self):
+        """Запускает автосохранение (вызывать после запуска event loop)"""
         asyncio.create_task(self.auto_save())
+        logger.info("Автосохранение запущено")
     
     def load(self):
         try:
@@ -127,8 +117,9 @@ class Database:
             logger.error(f"Ошибка сохранения данных: {e}")
     
     async def auto_save(self):
+        """Автоматическое сохранение каждые 5 минут"""
         while True:
-            await asyncio.sleep(300)
+            await asyncio.sleep(300)  # 5 минут
             await self.save()
     
     async def create_backup(self):
@@ -334,7 +325,10 @@ async def clean_temp_data():
             del temp_data[user_id]
             logger.info(f"Удалены устаревшие временные данные пользователя {user_id}")
 
-asyncio.create_task(clean_temp_data())
+# ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
 # ==================== КЛАВИАТУРЫ ====================
 
@@ -1911,6 +1905,12 @@ async def scheduler():
 
 async def on_startup():
     os.makedirs(MEDIA_DIR, exist_ok=True)
+    
+    # Запускаем автосохранение ТОЛЬКО после запуска event loop
+    db.start_auto_save()
+    
+    # Запускаем очистку временных данных
+    asyncio.create_task(clean_temp_data())
     
     try:
         await bot.delete_webhook(drop_pending_updates=True)
