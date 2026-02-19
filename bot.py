@@ -37,6 +37,8 @@ LIMIT_TEXTS = {
 }
 
 MAX_QUEUE_SIZE = 100
+MESSAGE_CLEANUP_DELAY = 300  # 5 минут для обычных сообщений
+POST_CLEANUP_DELAY = 600      # 10 минут для постов
 
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
@@ -302,6 +304,7 @@ def is_admin(username: Optional[str]) -> bool:
 async def check_bot_in_channel(channel_id: str) -> bool:
     try:
         chat = await bot.get_chat(channel_id)
+        # Пробуем отправить тестовое сообщение
         msg = await bot.send_message(channel_id, "🔍 Проверка связи...")
         await msg.delete()
         return True
@@ -352,7 +355,7 @@ temp_channel_add: Dict[int, bool] = {}
 # Очистка старых временных данных
 async def clean_temp_data():
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(3600)  # Каждый час
         now = datetime.now()
         to_delete = []
         for user_id, data in temp_data.items():
@@ -545,8 +548,13 @@ def error_handler(func):
         except TelegramRetryAfter as e:
             logger.warning(f"Flood control, waiting {e.retry_after} seconds")
             await asyncio.sleep(e.retry_after)
+            # Пробуем ещё раз после ожидания
+            return await func(*args, **kwargs)
         except TelegramNetworkError as e:
             logger.error(f"Network error: {e}")
+            # Ждём и пробуем снова
+            await asyncio.sleep(5)
+            return await func(*args, **kwargs)
         except Exception as e:
             logger.error(f"Unexpected error in {func.__name__}: {e}\n{traceback.format_exc()}")
     return wrapper
@@ -581,7 +589,7 @@ async def cancel_post(callback: CallbackQuery, state: FSMContext):
     msg = await bot.send_message(
         user_id,
         text,
-        reply_markup=get_start_keyboard(False)
+        reply_markup=get_start_keyboard(is_admin(callback.from_user.username))
     )
     
     # Автоудаление через 5 минут
@@ -689,6 +697,7 @@ async def handle_channel_input(message: types.Message):
     if user_id in temp_channel_add and is_admin(message.from_user.username):
         channel_input = message.text.strip()
         
+        # Парсим ссылку
         if 't.me/' in channel_input:
             channel_input = channel_input.split('t.me/')[-1].split('/')[0]
             if not channel_input.startswith('@'):
@@ -1014,13 +1023,14 @@ async def new_sticker(callback: CallbackQuery, state: FSMContext):
 
 # ==================== СБОР МЕДИА ====================
 
-@dp.message(PostStates.collecting_media, F.photo | F.video | F.media_group)
+@dp.message(PostStates.collecting_media)
 @error_handler
-async def collect_regular_media(message: types.Message, state: FSMContext, album: List[types.Message] = None):
+async def collect_regular_media(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
         await message.reply("Сначала выбери тип поста через /start")
+        await state.clear()
         return
     
     # Сохраняем ID сообщения для автоудаления
@@ -1030,14 +1040,22 @@ async def collect_regular_media(message: types.Message, state: FSMContext, album
     data = temp_data[user_id]
     current_count = len(data.get('photos', [])) + len(data.get('videos', []))
     
-    # Если это альбом (несколько фото/видео в одном сообщении)
-    if album:
-        total_in_album = len(album)
-        if not check_limit('regular', current_count, total_in_album):
+    # Если это не фото/видео
+    if not message.photo and not message.video:
+        reply_msg = await message.reply(
+            "❌ Отправляй только фото или видео",
+            reply_markup=get_content_keyboard()
+        )
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+        asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
+        return
+    
+    # Обработка одиночного сообщения
+    if message.photo:
+        if not check_limit('regular', current_count):
             reply_msg = await message.reply(
-                f"❌ Нельзя добавить {total_in_album} файлов! "
-                f"Лимит {LIMITS['regular']} файла, уже есть {current_count}. "
-                f"Можно добавить максимум {LIMITS['regular'] - current_count}.",
+                f"❌ Лимит {LIMITS['regular']} файла! Нельзя добавить больше.",
                 reply_markup=get_content_keyboard()
             )
             if user_id in temp_data:
@@ -1045,76 +1063,36 @@ async def collect_regular_media(message: types.Message, state: FSMContext, album
             asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
             return
         
-        added_photos = 0
-        added_videos = 0
+        photo = message.photo[-1]
+        data['photos'].append(photo.file_id)
+        new_count = current_count + 1
+        reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['regular']})")
         
-        for msg in album:
-            if msg.photo:
-                photo = msg.photo[-1]
-                data['photos'].append(photo.file_id)
-                added_photos += 1
-            elif msg.video:
-                data['videos'].append(msg.video.file_id)
-                added_videos += 1
-        
-        new_count = current_count + added_photos + added_videos
-        reply_msg = await message.reply(
-            f"✅ Добавлено файлов: {added_photos + added_videos} "
-            f"({new_count}/{LIMITS['regular']})"
-        )
-        if user_id in temp_data:
-            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
-        asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
-    
-    # Если это одиночное сообщение
-    else:
-        added = False
-        file_type = ""
-        
-        if message.photo:
-            if not check_limit('regular', current_count):
-                reply_msg = await message.reply(
-                    f"❌ Лимит {LIMITS['regular']} файла! Нельзя добавить больше.",
-                    reply_markup=get_content_keyboard()
-                )
-                if user_id in temp_data:
-                    temp_data[user_id]['message_ids'].append(reply_msg.message_id)
-                asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
-                return
-            
-            photo = message.photo[-1]
-            data['photos'].append(photo.file_id)
-            added = True
-            file_type = "фото"
-        
-        elif message.video:
-            if not check_limit('regular', current_count):
-                reply_msg = await message.reply(
-                    f"❌ Лимит {LIMITS['regular']} файла! Нельзя добавить больше.",
-                    reply_markup=get_content_keyboard()
-                )
-                if user_id in temp_data:
-                    temp_data[user_id]['message_ids'].append(reply_msg.message_id)
-                asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
-                return
-            
-            data['videos'].append(message.video.file_id)
-            added = True
-            file_type = "видео"
-        
-        if added:
-            new_count = current_count + 1
-            reply_msg = await message.reply(f"✅ {file_type} добавлено ({new_count}/{LIMITS['regular']})")
+    elif message.video:
+        if not check_limit('regular', current_count):
+            reply_msg = await message.reply(
+                f"❌ Лимит {LIMITS['regular']} файла! Нельзя добавить больше.",
+                reply_markup=get_content_keyboard()
+            )
             if user_id in temp_data:
                 temp_data[user_id]['message_ids'].append(reply_msg.message_id)
-            asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
+            asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
+            return
+        
+        data['videos'].append(message.video.file_id)
+        new_count = current_count + 1
+        reply_msg = await message.reply(f"✅ Видео добавлено ({new_count}/{LIMITS['regular']})")
+    
+    # Сохраняем reply_msg для автоудаления
+    if user_id in temp_data:
+        temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+    asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     # Обновляем сообщение с прогрессом
     if user_id in temp_data:
         if data.get('msg_id'):
             try:
                 await bot.delete_message(user_id, data['msg_id'])
-                # Удаляем старый msg_id из списка
                 if data['msg_id'] in temp_data[user_id]['message_ids']:
                     temp_data[user_id]['message_ids'].remove(data['msg_id'])
             except:
@@ -1135,20 +1113,25 @@ async def collect_regular_media(message: types.Message, state: FSMContext, album
         data['msg_id'] = msg.message_id
         temp_data[user_id]['message_ids'].append(msg.message_id)
 
-@dp.message(PostStates.collecting_livery_photo, F.photo | F.media_group)
+@dp.message(PostStates.collecting_livery_photo)
 @error_handler
-async def collect_livery_photo(message: types.Message, state: FSMContext, album: List[types.Message] = None):
+async def collect_livery_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
         await message.reply("Сначала выбери тип поста через /start")
+        await state.clear()
         return
     
     # Сохраняем ID сообщения для автоудаления
     if user_id in temp_data and 'message_ids' in temp_data[user_id]:
         temp_data[user_id]['message_ids'].append(message.message_id)
     
-    if message.video:
+    data = temp_data[user_id]
+    current_count = len(data.get('photos', []))
+    
+    # Проверяем, что это фото
+    if not message.photo:
         reply_msg = await message.reply(
             "❌ Для ливреи можно отправлять только фото!",
             reply_markup=get_content_keyboard()
@@ -1158,17 +1141,10 @@ async def collect_livery_photo(message: types.Message, state: FSMContext, album:
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
         return
     
-    data = temp_data[user_id]
-    current_count = len(data.get('photos', []))
-    
-    # Если это альбом (несколько фото в одном сообщении)
-    if album:
-        total_in_album = len(album)
-        if not check_limit('livery', current_count, total_in_album):
+    if message.photo:
+        if not check_limit('livery', current_count):
             reply_msg = await message.reply(
-                f"❌ Нельзя добавить {total_in_album} фото! "
-                f"Лимит {LIMITS['livery']} фото, уже есть {current_count}. "
-                f"Можно добавить максимум {LIMITS['livery'] - current_count}.",
+                f"❌ Лимит {LIMITS['livery']} фото! Нельзя добавить больше.",
                 reply_markup=get_content_keyboard()
             )
             if user_id in temp_data:
@@ -1176,48 +1152,20 @@ async def collect_livery_photo(message: types.Message, state: FSMContext, album:
             asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
             return
         
-        added_photos = 0
-        for msg in album:
-            if msg.photo:
-                photo = msg.photo[-1]
-                data['photos'].append(photo.file_id)
-                added_photos += 1
+        photo = message.photo[-1]
+        data['photos'].append(photo.file_id)
+        new_count = current_count + 1
+        reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['livery']})")
         
-        new_count = current_count + added_photos
-        reply_msg = await message.reply(
-            f"✅ Добавлено фото: {added_photos} ({new_count}/{LIMITS['livery']})"
-        )
         if user_id in temp_data:
             temp_data[user_id]['message_ids'].append(reply_msg.message_id)
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
-    
-    # Если это одиночное сообщение
-    else:
-        if message.photo:
-            if not check_limit('livery', current_count):
-                reply_msg = await message.reply(
-                    f"❌ Лимит {LIMITS['livery']} фото! Нельзя добавить больше.",
-                    reply_markup=get_content_keyboard()
-                )
-                if user_id in temp_data:
-                    temp_data[user_id]['message_ids'].append(reply_msg.message_id)
-                asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
-                return
-            
-            photo = message.photo[-1]
-            data['photos'].append(photo.file_id)
-            new_count = current_count + 1
-            reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['livery']})")
-            if user_id in temp_data:
-                temp_data[user_id]['message_ids'].append(reply_msg.message_id)
-            asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     # Обновляем сообщение с прогрессом
     if user_id in temp_data:
         if data.get('msg_id'):
             try:
                 await bot.delete_message(user_id, data['msg_id'])
-                # Удаляем старый msg_id из списка
                 if data['msg_id'] in temp_data[user_id]['message_ids']:
                     temp_data[user_id]['message_ids'].remove(data['msg_id'])
             except:
@@ -1238,20 +1186,25 @@ async def collect_livery_photo(message: types.Message, state: FSMContext, album:
         data['msg_id'] = msg.message_id
         temp_data[user_id]['message_ids'].append(msg.message_id)
 
-@dp.message(PostStates.collecting_sticker_photo, F.photo | F.media_group)
+@dp.message(PostStates.collecting_sticker_photo)
 @error_handler
-async def collect_sticker_photo(message: types.Message, state: FSMContext, album: List[types.Message] = None):
+async def collect_sticker_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
         await message.reply("Сначала выбери тип поста через /start")
+        await state.clear()
         return
     
     # Сохраняем ID сообщения для автоудаления
     if user_id in temp_data and 'message_ids' in temp_data[user_id]:
         temp_data[user_id]['message_ids'].append(message.message_id)
     
-    if message.video:
+    data = temp_data[user_id]
+    current_count = len(data.get('photos', []))
+    
+    # Проверяем, что это фото
+    if not message.photo:
         reply_msg = await message.reply(
             "❌ Для наклейки можно отправлять только фото!",
             reply_markup=get_content_keyboard()
@@ -1261,17 +1214,10 @@ async def collect_sticker_photo(message: types.Message, state: FSMContext, album
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
         return
     
-    data = temp_data[user_id]
-    current_count = len(data.get('photos', []))
-    
-    # Если это альбом (несколько фото в одном сообщении)
-    if album:
-        total_in_album = len(album)
-        if not check_limit('sticker', current_count, total_in_album):
+    if message.photo:
+        if not check_limit('sticker', current_count):
             reply_msg = await message.reply(
-                f"❌ Нельзя добавить {total_in_album} фото! "
-                f"Для наклейки нужно только 1 фото. "
-                f"Уже есть {current_count}.",
+                f"❌ Для наклейки нужно только 1 фото! Нельзя добавить больше.",
                 reply_markup=get_content_keyboard()
             )
             if user_id in temp_data:
@@ -1279,48 +1225,20 @@ async def collect_sticker_photo(message: types.Message, state: FSMContext, album
             asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
             return
         
-        # Добавляем только первое фото из альбома
-        for msg in album[:1]:
-            if msg.photo:
-                photo = msg.photo[-1]
-                data['photos'].append(photo.file_id)
-                break
-        
+        photo = message.photo[-1]
+        data['photos'].append(photo.file_id)
         new_count = current_count + 1
-        reply_msg = await message.reply(
-            f"✅ Фото добавлено ({new_count}/{LIMITS['sticker']})"
-        )
+        reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['sticker']})")
+        
         if user_id in temp_data:
             temp_data[user_id]['message_ids'].append(reply_msg.message_id)
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
-    
-    # Если это одиночное сообщение
-    else:
-        if message.photo:
-            if not check_limit('sticker', current_count):
-                reply_msg = await message.reply(
-                    f"❌ Для наклейки нужно только 1 фото! Нельзя добавить больше.",
-                    reply_markup=get_content_keyboard()
-                )
-                if user_id in temp_data:
-                    temp_data[user_id]['message_ids'].append(reply_msg.message_id)
-                asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
-                return
-            
-            photo = message.photo[-1]
-            data['photos'].append(photo.file_id)
-            new_count = current_count + 1
-            reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['sticker']})")
-            if user_id in temp_data:
-                temp_data[user_id]['message_ids'].append(reply_msg.message_id)
-            asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     # Обновляем сообщение с прогрессом
     if user_id in temp_data:
         if data.get('msg_id'):
             try:
                 await bot.delete_message(user_id, data['msg_id'])
-                # Удаляем старый msg_id из списка
                 if data['msg_id'] in temp_data[user_id]['message_ids']:
                     temp_data[user_id]['message_ids'].remove(data['msg_id'])
             except:
@@ -1727,6 +1645,7 @@ async def send_to_admin(post_id: int, content: Dict, username: str):
     }.get(content['type'], '📌 Пост')
     
     try:
+        # Отправляем все фото
         for photo_id in content.get('photos', []):
             await bot.send_photo(
                 ADMIN_ID,
@@ -1734,6 +1653,7 @@ async def send_to_admin(post_id: int, content: Dict, username: str):
                 caption=f"{post_type_text} #{post_id} от @{username}{channel_text}"
             )
         
+        # Отправляем все видео
         for video_id in content.get('videos', []):
             await bot.send_video(
                 ADMIN_ID,
@@ -1741,6 +1661,7 @@ async def send_to_admin(post_id: int, content: Dict, username: str):
                 caption=f"{post_type_text} #{post_id} от @{username}{channel_text}"
             )
         
+        # Отправляем файлы для ливреи
         if content['type'] == 'livery':
             if content['files'].get('body'):
                 await bot.send_document(
@@ -1755,6 +1676,7 @@ async def send_to_admin(post_id: int, content: Dict, username: str):
                     caption=f"📁 СТЕКЛО для поста #{post_id}"
                 )
         
+        # Отправляем файл для наклейки
         elif content['type'] == 'sticker':
             if content['files'].get('sticker'):
                 await bot.send_document(
@@ -1763,6 +1685,7 @@ async def send_to_admin(post_id: int, content: Dict, username: str):
                     caption=f"🏷️ Наклейка для поста #{post_id}"
                 )
         
+        # Отправляем сообщение с кнопками модерации
         await bot.send_message(
             ADMIN_ID,
             f"🔍 {post_type_text} #{post_id}{channel_text}:",
@@ -1782,17 +1705,21 @@ async def publish_post(post: Dict):
     try:
         content = post['content']
         
+        # Публикуем фото
         for photo_id in content.get('photos', []):
             await bot.send_photo(channel_id, photo_id)
         
+        # Публикуем видео
         for video_id in content.get('videos', []):
             await bot.send_video(channel_id, video_id)
         
+        # Публикуем автора
         await bot.send_message(
             channel_id,
             f"✍️ Автор: @{post['username']}"
         )
         
+        # Публикуем файлы для ливреи
         if content['type'] == 'livery':
             if content['files'].get('body'):
                 await bot.send_document(
@@ -1807,6 +1734,7 @@ async def publish_post(post: Dict):
                     caption="📁 Стекло"
                 )
         
+        # Публикуем файл для наклейки
         elif content['type'] == 'sticker':
             if content['files'].get('sticker'):
                 await bot.send_document(
@@ -2257,34 +2185,96 @@ async def scheduler():
         try:
             now = datetime.now()
             
+            # Проверяем посты с запланированным временем
             for post in db.posts:
-                if (post['status'] == 'approved' and 
-                    post.get('scheduled_time') and
-                    datetime.fromisoformat(post['scheduled_time']) <= now):
-                    await publish_post(post)
+                if post['status'] == 'approved' and post.get('scheduled_time'):
+                    try:
+                        scheduled_time = datetime.fromisoformat(post['scheduled_time'])
+                        if scheduled_time <= now:
+                            await publish_post(post)
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"Ошибка парсинга времени для поста #{post['id']}: {e}")
+                        # Если время некорректное, публикуем сейчас
+                        await publish_post(post)
             
+            # Публикация следующего поста в 6 утра
             if now.hour == 6 and now.minute == 0:
                 next_post = db.get_next_post()
                 if next_post and not next_post.get('scheduled_time'):
                     await publish_post(next_post)
             
+            # Очистка в 3 часа ночи
             if now.hour == 3 and now.minute == 0:
                 before = len(db.posts)
                 db.clean_old_posts(30)
                 after = len(db.posts)
                 if before != after:
-                    await bot.send_message(
-                        ADMIN_ID,
-                        f"🧹 Автоматическая очистка выполнена\n"
-                        f"Удалено записей: {before - after}\n"
-                        f"Осталось: {after}"
-                    )
+                    try:
+                        await bot.send_message(
+                            ADMIN_ID,
+                            f"🧹 Автоматическая очистка выполнена\n"
+                            f"Удалено записей: {before - after}\n"
+                            f"Осталось: {after}"
+                        )
+                    except:
+                        pass
                     await db.save()
         
         except Exception as e:
             logger.error(f"Ошибка в планировщике: {e}")
         
         await asyncio.sleep(60)
+
+# ==================== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ====================
+
+@dp.message()
+@error_handler
+async def handle_unknown_messages(message: types.Message, state: FSMContext):
+    """Обработчик для любых других сообщений"""
+    user_id = message.from_user.id
+    current_state = await state.get_state()
+    
+    # Если пользователь не в процессе создания поста
+    if current_state is None:
+        # Если это команда /start - обработаем её отдельно
+        if message.text and message.text.startswith('/start'):
+            await cmd_start(message, state)
+        else:
+            # Иначе предлагаем начать
+            try:
+                await message.delete()
+            except:
+                pass
+            msg = await message.answer(
+                "👋 Используй /start для начала работы",
+                reply_markup=get_new_post_keyboard()
+            )
+            asyncio.create_task(delete_message_after(user_id, msg.message_id, 30))
+    else:
+        # Если пользователь в процессе создания поста, но отправил что-то не то
+        try:
+            await message.delete()
+        except:
+            pass
+        
+        # Определяем тип текущего состояния
+        if current_state == PostStates.collecting_media.state:
+            hint = "Отправляй фото или видео"
+        elif current_state == PostStates.collecting_livery_photo.state:
+            hint = "Отправляй только фото"
+        elif current_state == PostStates.collecting_sticker_photo.state:
+            hint = "Отправляй только фото"
+        elif current_state == PostStates.waiting_livery_body_file.state:
+            hint = "Отправь файл .txt для кузова"
+        elif current_state == PostStates.waiting_livery_glass_file.state:
+            hint = "Отправь файл .txt для стекла"
+        elif current_state == PostStates.waiting_sticker_file.state:
+            hint = "Отправь файл .txt для наклейки"
+        else:
+            hint = "Используй кнопки для навигации"
+        
+        msg = await message.answer(f"❌ {hint}", reply_markup=get_cancel_keyboard())
+        asyncio.create_task(delete_message_after(user_id, msg.message_id, 5))
 
 # ==================== ЗАПУСК ====================
 
