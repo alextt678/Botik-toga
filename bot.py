@@ -24,9 +24,9 @@ MEDIA_DIR = "temp_media"
 
 # Лимиты для разных типов постов
 LIMITS = {
-    'regular': 4,  # Обычный пост: максимум 4 файла (фото+видео)
-    'livery': 4,   # Ливрея: максимум 4 фото
-    'sticker': 1   # Наклейка: максимум 1 фото
+    'regular': 4,
+    'livery': 4,
+    'sticker': 1
 }
 
 # Тексты для лимитов
@@ -299,12 +299,10 @@ def is_txt_file(file_name: str) -> bool:
     return file_name and file_name.lower().endswith('.txt')
 
 def check_limit(post_type: str, current_count: int) -> bool:
-    """Проверка лимитов для типа поста"""
     limit = LIMITS.get(post_type, 4)
     return current_count < limit
 
 def get_limit_text(post_type: str) -> str:
-    """Получение текста с лимитами"""
     return LIMIT_TEXTS.get(post_type, "⚠️ Превышен лимит файлов")
 
 # ==================== ФУНКЦИИ АВТОУДАЛЕНИЯ ====================
@@ -915,7 +913,6 @@ async def collect_regular_media(message: types.Message, state: FSMContext):
     data = temp_data[user_id]
     current_count = len(data.get('photos', [])) + len(data.get('videos', []))
     
-    # Проверка лимита
     if not check_limit('regular', current_count + 1):
         await message.reply(
             f"❌ Лимит {LIMITS['regular']} файла! Нажми Готово или Отмена",
@@ -971,7 +968,6 @@ async def collect_livery_photo(message: types.Message, state: FSMContext):
         await message.reply("Сначала выбери тип поста через /start")
         return
     
-    # Запрет на видео для ливреи
     if message.video:
         await message.reply(
             "❌ Для ливреи можно отправлять только фото!",
@@ -982,7 +978,6 @@ async def collect_livery_photo(message: types.Message, state: FSMContext):
     data = temp_data[user_id]
     current_count = len(data.get('photos', []))
     
-    # Проверка лимита
     if not check_limit('livery', current_count + 1):
         await message.reply(
             f"❌ Лимит {LIMITS['livery']} фото! Нажми Готово или Отмена",
@@ -1026,7 +1021,6 @@ async def collect_sticker_photo(message: types.Message, state: FSMContext):
         await message.reply("Сначала выбери тип поста через /start")
         return
     
-    # Запрет на видео для наклейки
     if message.video:
         await message.reply(
             "❌ Для наклейки можно отправлять только фото!",
@@ -1037,7 +1031,6 @@ async def collect_sticker_photo(message: types.Message, state: FSMContext):
     data = temp_data[user_id]
     current_count = len(data.get('photos', []))
     
-    # Проверка лимита
     if not check_limit('sticker', current_count + 1):
         await message.reply(
             f"❌ Для наклейки можно отправить только 1 фото! Нажми Готово или Отмена",
