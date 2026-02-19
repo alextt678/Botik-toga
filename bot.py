@@ -1,14 +1,14 @@
 import asyncio
 import os
-from datetime import datetime, timedelta, time
-from typing import List, Dict, Optional
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Union
 import logging
 import json
 import aiofiles
 import traceback
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -189,7 +189,7 @@ class Database:
     def get_pending_posts(self) -> List[Dict]:
         return [p for p in self.posts if p['status'] == 'pending']
     
-    def get_post(self, post_id: int) -> Dict | None:
+    def get_post(self, post_id: int) -> Optional[Dict]:
         for p in self.posts:
             if p['id'] == post_id:
                 return p
@@ -201,7 +201,7 @@ class Database:
             post['status'] = 'approved'
             post['scheduled_time'] = scheduled_time
     
-    def get_next_post(self) -> Dict | None:
+    def get_next_post(self) -> Optional[Dict]:
         approved = [p for p in self.posts if p['status'] == 'approved' and p.get('channel') == self.current_channel]
         if approved:
             approved.sort(key=lambda x: x['created_at'])
@@ -236,13 +236,22 @@ class Database:
             logger.info(f"Очистка: удалено {before - after} опубликованных постов")
     
     def get_stats(self) -> Dict:
+        oldest = None
+        newest = None
+        if self.posts:
+            try:
+                oldest = min([datetime.fromisoformat(p['created_at']) for p in self.posts])
+                newest = max([datetime.fromisoformat(p['created_at']) for p in self.posts])
+            except:
+                pass
+        
         return {
             'total': len(self.posts),
             'pending': len([p for p in self.posts if p['status'] == 'pending']),
             'approved': len([p for p in self.posts if p['status'] == 'approved']),
             'published': len([p for p in self.posts if p['status'] == 'published']),
-            'oldest': min([datetime.fromisoformat(p['created_at']) for p in self.posts]) if self.posts else None,
-            'newest': max([datetime.fromisoformat(p['created_at']) for p in self.posts]) if self.posts else None
+            'oldest': oldest,
+            'newest': newest
         }
     
     def add_channel(self, channel_id: str, title: str = None):
@@ -282,8 +291,8 @@ db = Database()
 
 # ==================== ФУНКЦИИ ПРОВЕРКИ ====================
 
-def is_admin(username: str) -> bool:
-    return username == ADMIN_USERNAME
+def is_admin(username: Optional[str]) -> bool:
+    return username == ADMIN_USERNAME if username else False
 
 async def check_bot_in_channel(channel_id: str) -> bool:
     try:
@@ -295,7 +304,7 @@ async def check_bot_in_channel(channel_id: str) -> bool:
         logger.error(f"Ошибка проверки канала {channel_id}: {e}")
         return False
 
-def is_txt_file(file_name: str) -> bool:
+def is_txt_file(file_name: Optional[str]) -> bool:
     return file_name and file_name.lower().endswith('.txt')
 
 def check_limit(post_type: str, current_count: int, additional: int = 1) -> bool:
@@ -308,15 +317,32 @@ def get_limit_text(post_type: str) -> str:
 # ==================== ФУНКЦИИ АВТОУДАЛЕНИЯ ====================
 
 async def delete_message_after(chat_id: int, message_id: int, seconds: int = 10):
+    """Удаляет сообщение через указанное количество секунд"""
     await asyncio.sleep(seconds)
     try:
         await bot.delete_message(chat_id, message_id)
     except:
         pass
 
+async def delete_user_messages(user_id: int, messages_to_keep: List[int] = None):
+    """Удаляет все старые сообщения пользователя, кроме указанных"""
+    if user_id in temp_data and 'message_ids' in temp_data[user_id]:
+        messages = temp_data[user_id]['message_ids'].copy()
+        keep_ids = messages_to_keep or []
+        
+        for msg_id in messages:
+            if msg_id not in keep_ids:
+                try:
+                    await bot.delete_message(user_id, msg_id)
+                except:
+                    pass
+        
+        # Очищаем список, оставляем только те, что нужно сохранить
+        temp_data[user_id]['message_ids'] = [msg_id for msg_id in messages if msg_id in keep_ids]
+
 # ==================== ВРЕМЕННОЕ ХРАНИЛИЩЕ ====================
-temp_data = {}
-temp_channel_add = {}
+temp_data: Dict[int, Dict] = {}
+temp_channel_add: Dict[int, bool] = {}
 
 # Очистка старых временных данных
 async def clean_temp_data():
@@ -326,13 +352,51 @@ async def clean_temp_data():
         to_delete = []
         for user_id, data in temp_data.items():
             if 'created_at' in data:
-                created = datetime.fromisoformat(data['created_at'])
-                if (now - created).seconds > 7200:
+                try:
+                    created = datetime.fromisoformat(data['created_at'])
+                    if (now - created).seconds > 7200:  # 2 часа
+                        # Удаляем все сообщения пользователя
+                        if 'message_ids' in data:
+                            for msg_id in data['message_ids']:
+                                try:
+                                    await bot.delete_message(user_id, msg_id)
+                                except:
+                                    pass
+                        to_delete.append(user_id)
+                except:
                     to_delete.append(user_id)
         
         for user_id in to_delete:
             del temp_data[user_id]
             logger.info(f"Удалены устаревшие временные данные пользователя {user_id}")
+
+# ==================== ФУНКЦИЯ ПРОВЕРКИ АКТИВНОГО ПОСТА ====================
+
+async def check_active_post(user_id: int, state: FSMContext) -> bool:
+    """Проверяет, есть ли у пользователя активный пост"""
+    current_state = await state.get_state()
+    
+    # Проверяем состояние FSM
+    if current_state is not None:
+        await bot.send_message(
+            user_id,
+            "⏳ У тебя уже есть пост на модерации! Дождись проверки."
+        )
+        return True
+    
+    # Проверяем временные данные
+    if user_id in temp_data:
+        # Если данные есть, но состояние сброшено - чистим их
+        if 'message_ids' in temp_data[user_id]:
+            for msg_id in temp_data[user_id]['message_ids']:
+                try:
+                    await bot.delete_message(user_id, msg_id)
+                except:
+                    pass
+        del temp_data[user_id]
+        return False
+    
+    return False
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 bot = Bot(token=BOT_TOKEN)
@@ -416,7 +480,7 @@ def get_content_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
-def get_post_navigation_keyboard(post_id: int, total: int, post_data: Dict) -> InlineKeyboardMarkup:
+def get_post_navigation_keyboard(post_id: int, total: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     
     nav_row = []
@@ -491,15 +555,12 @@ def error_handler(func):
 
 @dp.callback_query(F.data == "cancel_post")
 @error_handler
-async def cancel_post(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def cancel_post(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     
+    # Удаляем все сообщения пользователя
     if user_id in temp_data:
-        if temp_data[user_id].get('msg_id'):
-            try:
-                await bot.delete_message(user_id, temp_data[user_id]['msg_id'])
-            except:
-                pass
+        await delete_user_messages(user_id)
         del temp_data[user_id]
     
     await state.clear()
@@ -517,11 +578,14 @@ async def cancel_post(callback: CallbackQuery, state: FSMContext, **kwargs):
         "⚠️ Файлы .txt должны быть в формате .txt"
     )
     
-    await bot.send_message(
+    msg = await bot.send_message(
         user_id,
         text,
         reply_markup=get_start_keyboard(False)
     )
+    
+    # Автоудаление через 5 минут
+    asyncio.create_task(delete_message_after(user_id, msg.message_id, 300))
     
     await callback.answer("❌ Создание поста отменено")
 
@@ -529,9 +593,22 @@ async def cancel_post(callback: CallbackQuery, state: FSMContext, **kwargs):
 
 @dp.message(Command("start"))
 @error_handler
-async def cmd_start(message: types.Message, **kwargs):
+async def cmd_start(message: types.Message, state: FSMContext):
     user = message.from_user
+    user_id = user.id
     admin_user = is_admin(user.username)
+    
+    # Очищаем предыдущую сессию если есть
+    if user_id in temp_data:
+        await delete_user_messages(user_id)
+        del temp_data[user_id]
+    await state.clear()
+    
+    # Удаляем команду /start
+    try:
+        await message.delete()
+    except:
+        pass
     
     if admin_user:
         current = db.get_current_channel()
@@ -540,7 +617,7 @@ async def cmd_start(message: types.Message, **kwargs):
         else:
             text = "🔑 Панель администратора\n⚠️ Канал не выбран! Добавьте канал в управлении."
         
-        await message.answer(text, reply_markup=get_start_keyboard(True))
+        msg = await message.answer(text, reply_markup=get_start_keyboard(True))
     else:
         text = (
             "👋 Привет! Что хочешь отправить?\n\n"
@@ -549,11 +626,14 @@ async def cmd_start(message: types.Message, **kwargs):
             "🏷️ Наклейка - только 1 фото + 1 файл .txt\n\n"
             "⚠️ Файлы .txt должны быть в формате .txt"
         )
-        await message.answer(text, reply_markup=get_start_keyboard(False))
+        msg = await message.answer(text, reply_markup=get_start_keyboard(False))
+    
+    # Автоудаление через 10 минут
+    asyncio.create_task(delete_message_after(user_id, msg.message_id, 600))
 
 @dp.message(Command("clean"))
 @error_handler
-async def cmd_clean(message: types.Message, **kwargs):
+async def cmd_clean(message: types.Message):
     if not is_admin(message.from_user.username):
         await message.answer("⛔ Доступ запрещён")
         return
@@ -564,7 +644,7 @@ async def cmd_clean(message: types.Message, **kwargs):
 
 @dp.callback_query(F.data == "manage_channels")
 @error_handler
-async def manage_channels(callback: CallbackQuery, **kwargs):
+async def manage_channels(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -581,7 +661,7 @@ async def manage_channels(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data == "add_channel")
 @error_handler
-async def add_channel_start(callback: CallbackQuery, **kwargs):
+async def add_channel_start(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -603,7 +683,7 @@ async def add_channel_start(callback: CallbackQuery, **kwargs):
 
 @dp.message(F.text)
 @error_handler
-async def handle_channel_input(message: types.Message, **kwargs):
+async def handle_channel_input(message: types.Message):
     user_id = message.from_user.id
     
     if user_id in temp_channel_add and is_admin(message.from_user.username):
@@ -648,7 +728,7 @@ async def handle_channel_input(message: types.Message, **kwargs):
 
 @dp.callback_query(F.data.startswith("select_channel_"))
 @error_handler
-async def select_channel(callback: CallbackQuery, **kwargs):
+async def select_channel(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -677,7 +757,7 @@ async def select_channel(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data.startswith("set_current_"))
 @error_handler
-async def set_current_channel(callback: CallbackQuery, **kwargs):
+async def set_current_channel(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -693,7 +773,7 @@ async def set_current_channel(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data.startswith("delete_channel_"))
 @error_handler
-async def delete_channel(callback: CallbackQuery, **kwargs):
+async def delete_channel(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -708,7 +788,7 @@ async def delete_channel(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data == "back_to_admin")
 @error_handler
-async def back_to_admin(callback: CallbackQuery, **kwargs):
+async def back_to_admin(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -724,18 +804,21 @@ async def back_to_admin(callback: CallbackQuery, **kwargs):
     except:
         pass
     
-    await bot.send_message(
+    msg = await bot.send_message(
         callback.from_user.id,
         text,
         reply_markup=get_start_keyboard(True)
     )
+    
+    # Автоудаление через 10 минут
+    asyncio.create_task(delete_message_after(callback.from_user.id, msg.message_id, 600))
     await callback.answer()
 
 # ==================== УПРАВЛЕНИЕ ОЧИСТКОЙ ====================
 
 @dp.callback_query(F.data == "clean_menu")
 @error_handler
-async def clean_menu(callback: CallbackQuery, **kwargs):
+async def clean_menu(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -745,7 +828,7 @@ async def clean_menu(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data == "clean_published")
 @error_handler
-async def clean_published(callback: CallbackQuery, **kwargs):
+async def clean_published(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -764,7 +847,7 @@ async def clean_published(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data == "clean_30days")
 @error_handler
-async def clean_30days(callback: CallbackQuery, **kwargs):
+async def clean_30days(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -783,7 +866,7 @@ async def clean_30days(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data == "clean_stats")
 @error_handler
-async def clean_stats(callback: CallbackQuery, **kwargs):
+async def clean_stats(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -807,20 +890,27 @@ async def clean_stats(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data == "new_regular")
 @error_handler
-async def new_regular(callback: CallbackQuery, state: FSMContext, **kwargs):
-    await callback.answer()
+async def new_regular(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
     
-    if callback.from_user.id in temp_data:
-        await callback.message.answer("⏳ Сначала дождись проверки предыдущего поста!")
+    # Проверяем, нет ли активного поста
+    if await check_active_post(user_id, state):
+        await callback.answer()
         return
     
+    await callback.answer()
     await state.set_state(PostStates.collecting_media)
     
-    temp_data[callback.from_user.id] = {
+    # Удаляем старые сообщения
+    if user_id in temp_data:
+        await delete_user_messages(user_id)
+    
+    temp_data[user_id] = {
         'photos': [], 
         'videos': [], 
         'type': 'regular',
-        'created_at': datetime.now().isoformat()
+        'created_at': datetime.now().isoformat(),
+        'message_ids': []
     }
     
     try:
@@ -834,25 +924,34 @@ async def new_regular(callback: CallbackQuery, state: FSMContext, **kwargs):
         "Когда закончишь добавлять файлы - нажми Готово",
         reply_markup=get_content_keyboard()
     )
-    temp_data[callback.from_user.id]['msg_id'] = msg.message_id
+    
+    temp_data[user_id]['msg_id'] = msg.message_id
+    temp_data[user_id]['message_ids'].append(msg.message_id)
 
 @dp.callback_query(F.data == "new_livery")
 @error_handler
-async def new_livery(callback: CallbackQuery, state: FSMContext, **kwargs):
-    await callback.answer()
+async def new_livery(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
     
-    if callback.from_user.id in temp_data:
-        await callback.message.answer("⏳ Сначала дождись проверки предыдущего поста!")
+    # Проверяем, нет ли активного поста
+    if await check_active_post(user_id, state):
+        await callback.answer()
         return
     
+    await callback.answer()
     await state.set_state(PostStates.collecting_livery_photo)
     
-    temp_data[callback.from_user.id] = {
+    # Удаляем старые сообщения
+    if user_id in temp_data:
+        await delete_user_messages(user_id)
+    
+    temp_data[user_id] = {
         'photos': [], 
         'body_file': None, 
         'glass_file': None, 
         'type': 'livery',
-        'created_at': datetime.now().isoformat()
+        'created_at': datetime.now().isoformat(),
+        'message_ids': []
     }
     
     try:
@@ -868,24 +967,33 @@ async def new_livery(callback: CallbackQuery, state: FSMContext, **kwargs):
         "⚠️ Файлы должны быть строго в формате .txt",
         reply_markup=get_content_keyboard()
     )
-    temp_data[callback.from_user.id]['msg_id'] = msg.message_id
+    
+    temp_data[user_id]['msg_id'] = msg.message_id
+    temp_data[user_id]['message_ids'].append(msg.message_id)
 
 @dp.callback_query(F.data == "new_sticker")
 @error_handler
-async def new_sticker(callback: CallbackQuery, state: FSMContext, **kwargs):
-    await callback.answer()
+async def new_sticker(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
     
-    if callback.from_user.id in temp_data:
-        await callback.message.answer("⏳ Сначала дождись проверки предыдущего поста!")
+    # Проверяем, нет ли активного поста
+    if await check_active_post(user_id, state):
+        await callback.answer()
         return
     
+    await callback.answer()
     await state.set_state(PostStates.collecting_sticker_photo)
     
-    temp_data[callback.from_user.id] = {
+    # Удаляем старые сообщения
+    if user_id in temp_data:
+        await delete_user_messages(user_id)
+    
+    temp_data[user_id] = {
         'photos': [], 
         'sticker_file': None, 
         'type': 'sticker',
-        'created_at': datetime.now().isoformat()
+        'created_at': datetime.now().isoformat(),
+        'message_ids': []
     }
     
     try:
@@ -900,18 +1008,24 @@ async def new_sticker(callback: CallbackQuery, state: FSMContext, **kwargs):
         "⚠️ Файл должен быть в формате .txt",
         reply_markup=get_content_keyboard()
     )
-    temp_data[callback.from_user.id]['msg_id'] = msg.message_id
+    
+    temp_data[user_id]['msg_id'] = msg.message_id
+    temp_data[user_id]['message_ids'].append(msg.message_id)
 
 # ==================== СБОР МЕДИА ====================
 
 @dp.message(PostStates.collecting_media, F.photo | F.video | F.media_group)
 @error_handler
-async def collect_regular_media(message: types.Message, state: FSMContext, album: List[types.Message] = None, **kwargs):
+async def collect_regular_media(message: types.Message, state: FSMContext, album: List[types.Message] = None):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
         await message.reply("Сначала выбери тип поста через /start")
         return
+    
+    # Сохраняем ID сообщения для автоудаления
+    if user_id in temp_data and 'message_ids' in temp_data[user_id]:
+        temp_data[user_id]['message_ids'].append(message.message_id)
     
     data = temp_data[user_id]
     current_count = len(data.get('photos', [])) + len(data.get('videos', []))
@@ -920,12 +1034,15 @@ async def collect_regular_media(message: types.Message, state: FSMContext, album
     if album:
         total_in_album = len(album)
         if not check_limit('regular', current_count, total_in_album):
-            await message.reply(
+            reply_msg = await message.reply(
                 f"❌ Нельзя добавить {total_in_album} файлов! "
                 f"Лимит {LIMITS['regular']} файла, уже есть {current_count}. "
                 f"Можно добавить максимум {LIMITS['regular'] - current_count}.",
                 reply_markup=get_content_keyboard()
             )
+            if user_id in temp_data:
+                temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+            asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
             return
         
         added_photos = 0
@@ -945,6 +1062,8 @@ async def collect_regular_media(message: types.Message, state: FSMContext, album
             f"✅ Добавлено файлов: {added_photos + added_videos} "
             f"({new_count}/{LIMITS['regular']})"
         )
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     # Если это одиночное сообщение
@@ -954,10 +1073,13 @@ async def collect_regular_media(message: types.Message, state: FSMContext, album
         
         if message.photo:
             if not check_limit('regular', current_count):
-                await message.reply(
+                reply_msg = await message.reply(
                     f"❌ Лимит {LIMITS['regular']} файла! Нельзя добавить больше.",
                     reply_markup=get_content_keyboard()
                 )
+                if user_id in temp_data:
+                    temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+                asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
                 return
             
             photo = message.photo[-1]
@@ -967,10 +1089,13 @@ async def collect_regular_media(message: types.Message, state: FSMContext, album
         
         elif message.video:
             if not check_limit('regular', current_count):
-                await message.reply(
+                reply_msg = await message.reply(
                     f"❌ Лимит {LIMITS['regular']} файла! Нельзя добавить больше.",
                     reply_markup=get_content_keyboard()
                 )
+                if user_id in temp_data:
+                    temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+                asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
                 return
             
             data['videos'].append(message.video.file_id)
@@ -980,43 +1105,57 @@ async def collect_regular_media(message: types.Message, state: FSMContext, album
         if added:
             new_count = current_count + 1
             reply_msg = await message.reply(f"✅ {file_type} добавлено ({new_count}/{LIMITS['regular']})")
+            if user_id in temp_data:
+                temp_data[user_id]['message_ids'].append(reply_msg.message_id)
             asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     # Обновляем сообщение с прогрессом
-    if data.get('msg_id'):
-        try:
-            await bot.delete_message(user_id, data['msg_id'])
-        except:
-            pass
-    
-    total = len(data.get('photos', [])) + len(data.get('videos', []))
-    
-    msg_text = f"📦 Собрано: {total}/{LIMITS['regular']} файлов\n"
-    if total == LIMITS['regular']:
-        msg_text += "✅ Лимит достигнут! Больше добавить нельзя. Нажми Готово"
-    else:
-        msg_text += "Можешь добавить ещё или нажать Готово"
-    
-    msg = await message.answer(
-        msg_text,
-        reply_markup=get_content_keyboard()
-    )
-    data['msg_id'] = msg.message_id
+    if user_id in temp_data:
+        if data.get('msg_id'):
+            try:
+                await bot.delete_message(user_id, data['msg_id'])
+                # Удаляем старый msg_id из списка
+                if data['msg_id'] in temp_data[user_id]['message_ids']:
+                    temp_data[user_id]['message_ids'].remove(data['msg_id'])
+            except:
+                pass
+        
+        total = len(data.get('photos', [])) + len(data.get('videos', []))
+        
+        msg_text = f"📦 Собрано: {total}/{LIMITS['regular']} файлов\n"
+        if total == LIMITS['regular']:
+            msg_text += "✅ Лимит достигнут! Больше добавить нельзя. Нажми Готово"
+        else:
+            msg_text += "Можешь добавить ещё или нажать Готово"
+        
+        msg = await message.answer(
+            msg_text,
+            reply_markup=get_content_keyboard()
+        )
+        data['msg_id'] = msg.message_id
+        temp_data[user_id]['message_ids'].append(msg.message_id)
 
 @dp.message(PostStates.collecting_livery_photo, F.photo | F.media_group)
 @error_handler
-async def collect_livery_photo(message: types.Message, state: FSMContext, album: List[types.Message] = None, **kwargs):
+async def collect_livery_photo(message: types.Message, state: FSMContext, album: List[types.Message] = None):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
         await message.reply("Сначала выбери тип поста через /start")
         return
     
+    # Сохраняем ID сообщения для автоудаления
+    if user_id in temp_data and 'message_ids' in temp_data[user_id]:
+        temp_data[user_id]['message_ids'].append(message.message_id)
+    
     if message.video:
-        await message.reply(
+        reply_msg = await message.reply(
             "❌ Для ливреи можно отправлять только фото!",
             reply_markup=get_content_keyboard()
         )
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+        asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
         return
     
     data = temp_data[user_id]
@@ -1026,12 +1165,15 @@ async def collect_livery_photo(message: types.Message, state: FSMContext, album:
     if album:
         total_in_album = len(album)
         if not check_limit('livery', current_count, total_in_album):
-            await message.reply(
+            reply_msg = await message.reply(
                 f"❌ Нельзя добавить {total_in_album} фото! "
                 f"Лимит {LIMITS['livery']} фото, уже есть {current_count}. "
                 f"Можно добавить максимум {LIMITS['livery'] - current_count}.",
                 reply_markup=get_content_keyboard()
             )
+            if user_id in temp_data:
+                temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+            asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
             return
         
         added_photos = 0
@@ -1045,59 +1187,78 @@ async def collect_livery_photo(message: types.Message, state: FSMContext, album:
         reply_msg = await message.reply(
             f"✅ Добавлено фото: {added_photos} ({new_count}/{LIMITS['livery']})"
         )
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     # Если это одиночное сообщение
     else:
         if message.photo:
             if not check_limit('livery', current_count):
-                await message.reply(
+                reply_msg = await message.reply(
                     f"❌ Лимит {LIMITS['livery']} фото! Нельзя добавить больше.",
                     reply_markup=get_content_keyboard()
                 )
+                if user_id in temp_data:
+                    temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+                asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
                 return
             
             photo = message.photo[-1]
             data['photos'].append(photo.file_id)
             new_count = current_count + 1
             reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['livery']})")
+            if user_id in temp_data:
+                temp_data[user_id]['message_ids'].append(reply_msg.message_id)
             asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     # Обновляем сообщение с прогрессом
-    if data.get('msg_id'):
-        try:
-            await bot.delete_message(user_id, data['msg_id'])
-        except:
-            pass
-    
-    total = len(data['photos'])
-    
-    msg_text = f"📦 Собрано фото: {total}/{LIMITS['livery']}\n"
-    if total == LIMITS['livery']:
-        msg_text += "✅ Лимит достигнут! Больше добавить нельзя. Нажми Готово"
-    else:
-        msg_text += "Можешь добавить ещё или нажать Готово"
-    
-    msg = await message.answer(
-        msg_text,
-        reply_markup=get_content_keyboard()
-    )
-    data['msg_id'] = msg.message_id
+    if user_id in temp_data:
+        if data.get('msg_id'):
+            try:
+                await bot.delete_message(user_id, data['msg_id'])
+                # Удаляем старый msg_id из списка
+                if data['msg_id'] in temp_data[user_id]['message_ids']:
+                    temp_data[user_id]['message_ids'].remove(data['msg_id'])
+            except:
+                pass
+        
+        total = len(data['photos'])
+        
+        msg_text = f"📦 Собрано фото: {total}/{LIMITS['livery']}\n"
+        if total == LIMITS['livery']:
+            msg_text += "✅ Лимит достигнут! Больше добавить нельзя. Нажми Готово"
+        else:
+            msg_text += "Можешь добавить ещё или нажать Готово"
+        
+        msg = await message.answer(
+            msg_text,
+            reply_markup=get_content_keyboard()
+        )
+        data['msg_id'] = msg.message_id
+        temp_data[user_id]['message_ids'].append(msg.message_id)
 
 @dp.message(PostStates.collecting_sticker_photo, F.photo | F.media_group)
 @error_handler
-async def collect_sticker_photo(message: types.Message, state: FSMContext, album: List[types.Message] = None, **kwargs):
+async def collect_sticker_photo(message: types.Message, state: FSMContext, album: List[types.Message] = None):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
         await message.reply("Сначала выбери тип поста через /start")
         return
     
+    # Сохраняем ID сообщения для автоудаления
+    if user_id in temp_data and 'message_ids' in temp_data[user_id]:
+        temp_data[user_id]['message_ids'].append(message.message_id)
+    
     if message.video:
-        await message.reply(
+        reply_msg = await message.reply(
             "❌ Для наклейки можно отправлять только фото!",
             reply_markup=get_content_keyboard()
         )
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+        asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
         return
     
     data = temp_data[user_id]
@@ -1107,12 +1268,15 @@ async def collect_sticker_photo(message: types.Message, state: FSMContext, album
     if album:
         total_in_album = len(album)
         if not check_limit('sticker', current_count, total_in_album):
-            await message.reply(
+            reply_msg = await message.reply(
                 f"❌ Нельзя добавить {total_in_album} фото! "
                 f"Для наклейки нужно только 1 фото. "
                 f"Уже есть {current_count}.",
                 reply_markup=get_content_keyboard()
             )
+            if user_id in temp_data:
+                temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+            asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
             return
         
         # Добавляем только первое фото из альбома
@@ -1126,50 +1290,62 @@ async def collect_sticker_photo(message: types.Message, state: FSMContext, album
         reply_msg = await message.reply(
             f"✅ Фото добавлено ({new_count}/{LIMITS['sticker']})"
         )
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     # Если это одиночное сообщение
     else:
         if message.photo:
             if not check_limit('sticker', current_count):
-                await message.reply(
+                reply_msg = await message.reply(
                     f"❌ Для наклейки нужно только 1 фото! Нельзя добавить больше.",
                     reply_markup=get_content_keyboard()
                 )
+                if user_id in temp_data:
+                    temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+                asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
                 return
             
             photo = message.photo[-1]
             data['photos'].append(photo.file_id)
             new_count = current_count + 1
             reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['sticker']})")
+            if user_id in temp_data:
+                temp_data[user_id]['message_ids'].append(reply_msg.message_id)
             asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     # Обновляем сообщение с прогрессом
-    if data.get('msg_id'):
-        try:
-            await bot.delete_message(user_id, data['msg_id'])
-        except:
-            pass
-    
-    total = len(data['photos'])
-    
-    msg_text = f"📦 Собрано фото: {total}/{LIMITS['sticker']}\n"
-    if total == LIMITS['sticker']:
-        msg_text += "✅ Фото получено! Нажми Готово для продолжения"
-    else:
-        msg_text += "Отправь фото"
-    
-    msg = await message.answer(
-        msg_text,
-        reply_markup=get_content_keyboard()
-    )
-    data['msg_id'] = msg.message_id
+    if user_id in temp_data:
+        if data.get('msg_id'):
+            try:
+                await bot.delete_message(user_id, data['msg_id'])
+                # Удаляем старый msg_id из списка
+                if data['msg_id'] in temp_data[user_id]['message_ids']:
+                    temp_data[user_id]['message_ids'].remove(data['msg_id'])
+            except:
+                pass
+        
+        total = len(data['photos'])
+        
+        msg_text = f"📦 Собрано фото: {total}/{LIMITS['sticker']}\n"
+        if total == LIMITS['sticker']:
+            msg_text += "✅ Фото получено! Нажми Готово для продолжения"
+        else:
+            msg_text += "Отправь фото"
+        
+        msg = await message.answer(
+            msg_text,
+            reply_markup=get_content_keyboard()
+        )
+        data['msg_id'] = msg.message_id
+        temp_data[user_id]['message_ids'].append(msg.message_id)
 
 # ==================== ОБРАБОТКА НАЖАТИЯ "ГОТОВО" ====================
 
 @dp.callback_query(F.data == "content_done")
 @error_handler
-async def content_done(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def content_done(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     current_state = await state.get_state()
     
@@ -1185,7 +1361,6 @@ async def content_done(callback: CallbackQuery, state: FSMContext, **kwargs):
             await callback.answer("❌ Сначала отправь файлы", show_alert=True)
             return
         
-        # Убрали проверку на строгое количество файлов
         text = "📋 *Проверь содержимое:*\n\n"
         if data.get('photos'):
             text += f"📸 Фото: {len(data['photos'])}\n"
@@ -1202,7 +1377,6 @@ async def content_done(callback: CallbackQuery, state: FSMContext, **kwargs):
             await callback.answer("❌ Сначала отправь фото", show_alert=True)
             return
         
-        # Убрали проверку на строгое количество фото
         await state.set_state(PostStates.waiting_livery_body_file)
         await callback.message.edit_text(
             "📁 Отправь файл на КУЗОВ (только .txt)\n"
@@ -1235,7 +1409,7 @@ async def content_done(callback: CallbackQuery, state: FSMContext, **kwargs):
 
 @dp.callback_query(F.data == "confirm_send")
 @error_handler
-async def confirm_send(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def confirm_send(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     
     if user_id not in temp_data:
@@ -1275,11 +1449,13 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext, **kwargs):
     
     await send_to_admin(post_id, content, username)
     
-    if data.get('msg_id'):
-        try:
-            await bot.delete_message(user_id, data['msg_id'])
-        except:
-            pass
+    # Удаляем все сообщения пользователя, кроме финального
+    if 'message_ids' in data:
+        for msg_id in data['message_ids']:
+            try:
+                await bot.delete_message(user_id, msg_id)
+            except:
+                pass
     
     del temp_data[user_id]
     await state.clear()
@@ -1294,7 +1470,7 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext, **kwargs):
 
 @dp.callback_query(F.data == "confirm_redo")
 @error_handler
-async def confirm_redo(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def confirm_redo(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     
     if user_id not in temp_data:
@@ -1304,46 +1480,79 @@ async def confirm_redo(callback: CallbackQuery, state: FSMContext, **kwargs):
     
     data = temp_data[user_id]
     
+    # Удаляем все старые сообщения
+    if 'message_ids' in data:
+        for msg_id in data['message_ids']:
+            try:
+                await bot.delete_message(user_id, msg_id)
+            except:
+                pass
+    
     if data['type'] == 'regular':
         data['photos'] = []
         data['videos'] = []
+        data['message_ids'] = []
         await state.set_state(PostStates.collecting_media)
-        await callback.message.edit_text(
+        msg = await callback.message.edit_text(
             f"📤 Отправляй фото или видео (максимум {LIMITS['regular']} файлов) заново:",
             reply_markup=get_content_keyboard()
         )
+        data['msg_id'] = msg.message_id
+        data['message_ids'].append(msg.message_id)
+    
     elif data['type'] == 'livery':
         data['photos'] = []
         data['body_file'] = None
         data['glass_file'] = None
+        data['message_ids'] = []
         await state.set_state(PostStates.collecting_livery_photo)
-        await callback.message.edit_text(
+        msg = await callback.message.edit_text(
             f"👕 Отправь фото ливреи (максимум {LIMITS['livery']} фото) заново:",
             reply_markup=get_content_keyboard()
         )
+        data['msg_id'] = msg.message_id
+        data['message_ids'].append(msg.message_id)
+    
     elif data['type'] == 'sticker':
         data['photos'] = []
         data['sticker_file'] = None
+        data['message_ids'] = []
         await state.set_state(PostStates.collecting_sticker_photo)
-        await callback.message.edit_text(
+        msg = await callback.message.edit_text(
             f"🏷️ Отправь фото наклейки (только {LIMITS['sticker']} фото) заново:",
             reply_markup=get_content_keyboard()
         )
+        data['msg_id'] = msg.message_id
+        data['message_ids'].append(msg.message_id)
 
 # ==================== СБОР ФАЙЛОВ ДЛЯ ЛИВРЕИ ====================
 
 @dp.message(PostStates.waiting_livery_body_file, F.document)
 @error_handler
-async def get_livery_body_file(message: types.Message, state: FSMContext, **kwargs):
+async def get_livery_body_file(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
+    if user_id not in temp_data:
+        await message.reply("Сначала выбери тип поста через /start")
+        return
+    
+    # Сохраняем ID сообщения для автоудаления
+    if user_id in temp_data and 'message_ids' in temp_data[user_id]:
+        temp_data[user_id]['message_ids'].append(message.message_id)
+    
     if not message.document:
-        await message.reply("❌ Отправь файл в формате .txt")
+        reply_msg = await message.reply("❌ Отправь файл в формате .txt")
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+        asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
         return
     
     file_name = message.document.file_name
     if not is_txt_file(file_name):
-        await message.reply("❌ Файл должен быть в формате .txt")
+        reply_msg = await message.reply("❌ Файл должен быть в формате .txt")
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+        asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
         return
     
     temp_data[user_id]['body_file'] = {
@@ -1352,24 +1561,51 @@ async def get_livery_body_file(message: types.Message, state: FSMContext, **kwar
     }
     
     await state.set_state(PostStates.waiting_livery_glass_file)
-    await message.answer(
+    
+    # Удаляем предыдущее сообщение с инструкцией
+    if user_id in temp_data and temp_data[user_id].get('msg_id'):
+        try:
+            await bot.delete_message(user_id, temp_data[user_id]['msg_id'])
+            if temp_data[user_id]['msg_id'] in temp_data[user_id]['message_ids']:
+                temp_data[user_id]['message_ids'].remove(temp_data[user_id]['msg_id'])
+        except:
+            pass
+    
+    msg = await message.answer(
         "✅ Файл кузова получен\n\n"
         "📁 Теперь отправь файл на СТЕКЛО (только .txt)",
         reply_markup=get_cancel_keyboard()
     )
+    if user_id in temp_data:
+        temp_data[user_id]['msg_id'] = msg.message_id
+        temp_data[user_id]['message_ids'].append(msg.message_id)
 
 @dp.message(PostStates.waiting_livery_glass_file, F.document)
 @error_handler
-async def get_livery_glass_file(message: types.Message, state: FSMContext, **kwargs):
+async def get_livery_glass_file(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
+    if user_id not in temp_data:
+        await message.reply("Сначала выбери тип поста через /start")
+        return
+    
+    # Сохраняем ID сообщения для автоудаления
+    if user_id in temp_data and 'message_ids' in temp_data[user_id]:
+        temp_data[user_id]['message_ids'].append(message.message_id)
+    
     if not message.document:
-        await message.reply("❌ Отправь файл в формате .txt")
+        reply_msg = await message.reply("❌ Отправь файл в формате .txt")
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+        asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
         return
     
     file_name = message.document.file_name
     if not is_txt_file(file_name):
-        await message.reply("❌ Файл должен быть в формате .txt")
+        reply_msg = await message.reply("❌ Файл должен быть в формате .txt")
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+        asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
         return
     
     temp_data[user_id]['glass_file'] = {
@@ -1385,22 +1621,49 @@ async def get_livery_glass_file(message: types.Message, state: FSMContext, **kwa
     text += "\nВсё верно?"
     
     await state.set_state(PostStates.confirm_post)
-    await message.answer(text, parse_mode='Markdown', reply_markup=get_confirm_keyboard())
+    
+    # Удаляем предыдущее сообщение с инструкцией
+    if user_id in temp_data and temp_data[user_id].get('msg_id'):
+        try:
+            await bot.delete_message(user_id, temp_data[user_id]['msg_id'])
+            if temp_data[user_id]['msg_id'] in temp_data[user_id]['message_ids']:
+                temp_data[user_id]['message_ids'].remove(temp_data[user_id]['msg_id'])
+        except:
+            pass
+    
+    msg = await message.answer(text, parse_mode='Markdown', reply_markup=get_confirm_keyboard())
+    if user_id in temp_data:
+        temp_data[user_id]['msg_id'] = msg.message_id
+        temp_data[user_id]['message_ids'].append(msg.message_id)
 
 # ==================== СБОР ФАЙЛА ДЛЯ НАКЛЕЙКИ ====================
 
 @dp.message(PostStates.waiting_sticker_file, F.document)
 @error_handler
-async def get_sticker_file(message: types.Message, state: FSMContext, **kwargs):
+async def get_sticker_file(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
+    if user_id not in temp_data:
+        await message.reply("Сначала выбери тип поста через /start")
+        return
+    
+    # Сохраняем ID сообщения для автоудаления
+    if user_id in temp_data and 'message_ids' in temp_data[user_id]:
+        temp_data[user_id]['message_ids'].append(message.message_id)
+    
     if not message.document:
-        await message.reply("❌ Отправь файл в формате .txt")
+        reply_msg = await message.reply("❌ Отправь файл в формате .txt")
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+        asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
         return
     
     file_name = message.document.file_name
     if not is_txt_file(file_name):
-        await message.reply("❌ Файл должен быть в формате .txt")
+        reply_msg = await message.reply("❌ Файл должен быть в формате .txt")
+        if user_id in temp_data:
+            temp_data[user_id]['message_ids'].append(reply_msg.message_id)
+        asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 5))
         return
     
     temp_data[user_id]['sticker_file'] = {
@@ -1415,7 +1678,20 @@ async def get_sticker_file(message: types.Message, state: FSMContext, **kwargs):
     text += "\nВсё верно?"
     
     await state.set_state(PostStates.confirm_post)
-    await message.answer(text, parse_mode='Markdown', reply_markup=get_confirm_keyboard())
+    
+    # Удаляем предыдущее сообщение с инструкцией
+    if user_id in temp_data and temp_data[user_id].get('msg_id'):
+        try:
+            await bot.delete_message(user_id, temp_data[user_id]['msg_id'])
+            if temp_data[user_id]['msg_id'] in temp_data[user_id]['message_ids']:
+                temp_data[user_id]['message_ids'].remove(temp_data[user_id]['msg_id'])
+        except:
+            pass
+    
+    msg = await message.answer(text, parse_mode='Markdown', reply_markup=get_confirm_keyboard())
+    if user_id in temp_data:
+        temp_data[user_id]['msg_id'] = msg.message_id
+        temp_data[user_id]['message_ids'].append(msg.message_id)
 
 # ==================== ФУНКЦИЯ ОТПРАВКИ КНОПКИ ПОЛЬЗОВАТЕЛЮ ====================
 
@@ -1428,11 +1704,13 @@ async def send_new_post_button(user_id: int):
             "🏷️ Наклейка - только 1 фото + 1 файл .txt\n\n"
             "⚠️ Файлы .txt должны быть в формате .txt"
         )
-        await bot.send_message(
+        msg = await bot.send_message(
             user_id,
             text,
             reply_markup=get_new_post_keyboard()
         )
+        # Автоудаление через 10 минут
+        asyncio.create_task(delete_message_after(user_id, msg.message_id, 600))
     except Exception as e:
         logger.error(f"Не удалось отправить кнопку пользователю {user_id}: {e}")
 
@@ -1558,7 +1836,7 @@ async def publish_post(post: Dict):
 
 @dp.callback_query(F.data == "admin_queue")
 @error_handler
-async def show_queue(callback: CallbackQuery, **kwargs):
+async def show_queue(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1673,7 +1951,7 @@ async def show_post_detail(callback: CallbackQuery, post_id: int):
                 post['content']['photos'][0],
                 caption=text,
                 parse_mode='Markdown',
-                reply_markup=get_post_navigation_keyboard(post_id, total, post)
+                reply_markup=get_post_navigation_keyboard(post_id, total)
             )
         elif post['content'].get('videos'):
             await bot.send_video(
@@ -1681,14 +1959,14 @@ async def show_post_detail(callback: CallbackQuery, post_id: int):
                 post['content']['videos'][0],
                 caption=text,
                 parse_mode='Markdown',
-                reply_markup=get_post_navigation_keyboard(post_id, total, post)
+                reply_markup=get_post_navigation_keyboard(post_id, total)
             )
         else:
             await bot.send_message(
                 callback.from_user.id,
                 text,
                 parse_mode='Markdown',
-                reply_markup=get_post_navigation_keyboard(post_id, total, post)
+                reply_markup=get_post_navigation_keyboard(post_id, total)
             )
     except Exception as e:
         logger.error(f"Ошибка показа поста #{post_id}: {e}")
@@ -1696,12 +1974,12 @@ async def show_post_detail(callback: CallbackQuery, post_id: int):
             callback.from_user.id,
             text,
             parse_mode='Markdown',
-            reply_markup=get_post_navigation_keyboard(post_id, total, post)
+            reply_markup=get_post_navigation_keyboard(post_id, total)
         )
 
 @dp.callback_query(F.data.startswith("view_post_"))
 @error_handler
-async def view_post(callback: CallbackQuery, **kwargs):
+async def view_post(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1711,33 +1989,43 @@ async def view_post(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data.startswith("nav_"))
 @error_handler
-async def navigation_handler(callback: CallbackQuery, **kwargs):
+async def navigation_handler(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
     
-    action = callback.data.split("_")[1]
-    post_id = int(callback.data.split("_")[2])
+    parts = callback.data.split("_")
+    action = parts[1]
+    post_id = int(parts[2])
     
     pending = db.get_pending_posts()
     post_ids = [p['id'] for p in pending]
     
     if action == "prev":
-        current_index = post_ids.index(post_id)
-        if current_index > 0:
-            await show_post_detail(callback, post_ids[current_index - 1])
-        else:
-            await callback.answer("Это первый пост", show_alert=True)
+        try:
+            current_index = post_ids.index(post_id)
+            if current_index > 0:
+                await show_post_detail(callback, post_ids[current_index - 1])
+            else:
+                await callback.answer("Это первый пост", show_alert=True)
+        except ValueError:
+            await callback.answer("Пост не найден", show_alert=True)
     
     elif action == "next":
-        current_index = post_ids.index(post_id)
-        if current_index < len(post_ids) - 1:
-            await show_post_detail(callback, post_ids[current_index + 1])
-        else:
-            await callback.answer("Это последний пост", show_alert=True)
+        try:
+            current_index = post_ids.index(post_id)
+            if current_index < len(post_ids) - 1:
+                await show_post_detail(callback, post_ids[current_index + 1])
+            else:
+                await callback.answer("Это последний пост", show_alert=True)
+        except ValueError:
+            await callback.answer("Пост не найден", show_alert=True)
     
     elif action == "approve":
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except:
+            pass
         await approve_post_logic(callback, post_id)
     
     elif action == "reject":
@@ -1750,7 +2038,10 @@ async def navigation_handler(callback: CallbackQuery, **kwargs):
         await show_queue(callback)
     
     elif action in ["10sec", "10min", "sched"]:
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except:
+            pass
         await set_time_logic(callback, post_id, action)
 
 async def approve_post_logic(callback: CallbackQuery, post_id: int):
@@ -1833,7 +2124,7 @@ async def set_time_logic(callback: CallbackQuery, post_id: int, time_type: str):
 
 @dp.callback_query(F.data.startswith("approve_"))
 @error_handler
-async def approve_post(callback: CallbackQuery, **kwargs):
+async def approve_post(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1860,7 +2151,7 @@ async def approve_post(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data.startswith("reject_"))
 @error_handler
-async def reject_post(callback: CallbackQuery, **kwargs):
+async def reject_post(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1888,7 +2179,7 @@ async def reject_post(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data.startswith("time_"))
 @error_handler
-async def set_time(callback: CallbackQuery, **kwargs):
+async def set_time(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1933,7 +2224,7 @@ async def set_time(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data == "admin_stats")
 @error_handler
-async def show_stats(callback: CallbackQuery, **kwargs):
+async def show_stats(callback: CallbackQuery):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1956,7 +2247,7 @@ async def show_stats(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(F.data == "no_action")
 @error_handler
-async def no_action(callback: CallbackQuery, **kwargs):
+async def no_action(callback: CallbackQuery):
     await callback.answer()
 
 # ==================== ПЛАНИРОВЩИК ====================
