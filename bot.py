@@ -29,7 +29,13 @@ LIMITS = {
     'sticker': 1   # Наклейка: максимум 1 фото
 }
 
-# Максимальный размер очереди для защиты
+# Тексты для лимитов
+LIMIT_TEXTS = {
+    'regular': "⚠️ Для обычного поста можно отправить не более 4 файлов (фото/видео)",
+    'livery': "⚠️ Для ливреи можно отправить не более 4 фото (видео нельзя)",
+    'sticker': "⚠️ Для наклейки можно отправить только 1 фото (видео нельзя)"
+}
+
 MAX_QUEUE_SIZE = 100
 
 os.makedirs(MEDIA_DIR, exist_ok=True)
@@ -74,11 +80,9 @@ class Database:
         self.current_channel: Optional[str] = None
         self.last_save = datetime.now()
         self.load()
-        # Запускаем автосохранение
         asyncio.create_task(self.auto_save())
     
     def load(self):
-        """Загрузка данных с восстановлением при ошибках"""
         try:
             if os.path.exists(DB_FILE):
                 with open(DB_FILE, 'r', encoding='utf-8') as f:
@@ -87,7 +91,6 @@ class Database:
         except Exception as e:
             logger.error(f"Ошибка загрузки постов: {e}")
             self.posts = []
-            # Пробуем восстановить из бэкапа
             self.restore_from_backup()
         
         try:
@@ -103,9 +106,7 @@ class Database:
             self.current_channel = None
     
     async def save(self):
-        """Сохранение данных с созданием бэкапа"""
         try:
-            # Создаём бэкап раз в час
             if (datetime.now() - self.last_save).seconds > 3600:
                 await self.create_backup()
             
@@ -126,13 +127,11 @@ class Database:
             logger.error(f"Ошибка сохранения данных: {e}")
     
     async def auto_save(self):
-        """Автоматическое сохранение каждые 5 минут"""
         while True:
-            await asyncio.sleep(300)  # 5 минут
+            await asyncio.sleep(300)
             await self.save()
     
     async def create_backup(self):
-        """Создание резервной копии"""
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_file = f"{BACKUP_DIR}/posts_{timestamp}.json"
@@ -140,14 +139,12 @@ class Database:
             async with aiofiles.open(backup_file, 'w', encoding='utf-8') as f:
                 await f.write(json.dumps(self.posts, ensure_ascii=False, indent=2))
             
-            # Удаляем старые бэкапы (старше 7 дней)
             await self.clean_old_backups()
             
         except Exception as e:
             logger.error(f"Ошибка создания бэкапа: {e}")
     
     async def clean_old_backups(self):
-        """Удаление старых бэкапов"""
         try:
             now = datetime.now()
             for file in os.listdir(BACKUP_DIR):
@@ -161,7 +158,6 @@ class Database:
             logger.error(f"Ошибка очистки бэкапов: {e}")
     
     def restore_from_backup(self):
-        """Восстановление из последнего бэкапа"""
         try:
             backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith('posts_')])
             if backups:
@@ -173,10 +169,8 @@ class Database:
             logger.error(f"Ошибка восстановления из бэкапа: {e}")
     
     def add_post(self, user_id: int, username: str, content: Dict) -> int:
-        """Добавление поста с проверкой размера очереди"""
-        # Защита от переполнения
         if len(self.posts) > MAX_QUEUE_SIZE:
-            self.clean_old_posts(60)  # Удаляем очень старые
+            self.clean_old_posts(60)
         
         post_id = len(self.posts) + 1
         post = {
@@ -311,12 +305,7 @@ def check_limit(post_type: str, current_count: int) -> bool:
 
 def get_limit_text(post_type: str) -> str:
     """Получение текста с лимитами"""
-    limits = {
-        'regular': "⚠️ Для обычного поста можно отправить не более 4 файлов (фото/видео)",
-        'livery': "⚠️ Для ливреи можно отправить не более 4 фото (видео нельзя)",
-        'sticker': "⚠️ Для наклейки можно отправить только 1 фото (видео нельзя)"
-    }
-    return limits.get(post_type, "⚠️ Превышен лимит файлов")
+    return LIMIT_TEXTS.get(post_type, "⚠️ Превышен лимит файлов")
 
 # ==================== ФУНКЦИИ АВТОУДАЛЕНИЯ ====================
 
@@ -334,13 +323,13 @@ temp_channel_add = {}
 # Очистка старых временных данных
 async def clean_temp_data():
     while True:
-        await asyncio.sleep(3600)  # Каждый час
+        await asyncio.sleep(3600)
         now = datetime.now()
         to_delete = []
         for user_id, data in temp_data.items():
             if 'created_at' in data:
                 created = datetime.fromisoformat(data['created_at'])
-                if (now - created).seconds > 7200:  # Старше 2 часов
+                if (now - created).seconds > 7200:
                     to_delete.append(user_id)
         
         for user_id in to_delete:
@@ -841,7 +830,7 @@ async def new_regular(callback: CallbackQuery, state: FSMContext):
     msg = await callback.message.answer(
         "📤 Отправляй фото или видео (максимум 4 файла)\n"
         "Можно отправить несколько файлов одним сообщением\n"
-        "Когда закончишь - нажми кнопку",
+        "Когда соберёшь 4 файла - нажми Готово",
         reply_markup=get_content_keyboard()
     )
     temp_data[callback.from_user.id]['msg_id'] = msg.message_id
@@ -873,8 +862,8 @@ async def new_livery(callback: CallbackQuery, state: FSMContext):
     msg = await callback.message.answer(
         "👕 Создание ливреи\n\n"
         "1. Отправь фото ливреи (максимум 4 фото, видео нельзя)\n"
-        "2. После фото я попрошу отправить файл на КУЗОВ (.txt)\n"
-        "3. Затем файл на СТЕКЛО (.txt)\n\n"
+        "2. Когда соберёшь 4 фото - нажми Готово\n"
+        "3. Затем отправь файлы .txt\n\n"
         "⚠️ Файлы должны быть строго в формате .txt",
         reply_markup=get_content_keyboard()
     )
@@ -928,23 +917,29 @@ async def collect_regular_media(message: types.Message, state: FSMContext):
     
     # Проверка лимита
     if not check_limit('regular', current_count + 1):
-        await message.reply(get_limit_text('regular'))
+        await message.reply(
+            f"❌ Лимит {LIMITS['regular']} файла! Нажми Готово или Отмена",
+            reply_markup=get_content_keyboard()
+        )
         return
     
     added = False
+    file_type = ""
     
     if message.photo:
         photo = message.photo[-1]
         data['photos'].append(photo.file_id)
         added = True
+        file_type = "фото"
     
     elif message.video:
         data['videos'].append(message.video.file_id)
         added = True
+        file_type = "видео"
     
     if added:
-        total = current_count + 1
-        reply_msg = await message.reply(f"✅ Добавлено ({total}/{LIMITS['regular']})")
+        new_count = current_count + 1
+        reply_msg = await message.reply(f"✅ {file_type} добавлено ({new_count}/{LIMITS['regular']})")
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     if data.get('msg_id'):
@@ -955,9 +950,14 @@ async def collect_regular_media(message: types.Message, state: FSMContext):
     
     total = len(data.get('photos', [])) + len(data.get('videos', []))
     
+    msg_text = f"📦 Собрано: {total}/{LIMITS['regular']} файлов\n"
+    if total == LIMITS['regular']:
+        msg_text += "✅ Лимит достигнут! Нажми Готово"
+    else:
+        msg_text += "Можешь добавить ещё или нажать Готово"
+    
     msg = await message.answer(
-        f"📦 Собрано: {total}/{LIMITS['regular']} файлов\n"
-        "Можешь добавить ещё или нажать Готово",
+        msg_text,
         reply_markup=get_content_keyboard()
     )
     data['msg_id'] = msg.message_id
@@ -971,23 +971,30 @@ async def collect_livery_photo(message: types.Message, state: FSMContext):
         await message.reply("Сначала выбери тип поста через /start")
         return
     
+    # Запрет на видео для ливреи
+    if message.video:
+        await message.reply(
+            "❌ Для ливреи можно отправлять только фото!",
+            reply_markup=get_content_keyboard()
+        )
+        return
+    
     data = temp_data[user_id]
     current_count = len(data.get('photos', []))
     
     # Проверка лимита
     if not check_limit('livery', current_count + 1):
-        await message.reply(get_limit_text('livery'))
-        return
-    
-    if message.video:
-        await message.reply("❌ Для ливреи можно отправлять только фото!")
+        await message.reply(
+            f"❌ Лимит {LIMITS['livery']} фото! Нажми Готово или Отмена",
+            reply_markup=get_content_keyboard()
+        )
         return
     
     if message.photo:
         photo = message.photo[-1]
         data['photos'].append(photo.file_id)
-        total = current_count + 1
-        reply_msg = await message.reply(f"✅ Фото добавлено ({total}/{LIMITS['livery']})")
+        new_count = current_count + 1
+        reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['livery']})")
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     if data.get('msg_id'):
@@ -996,9 +1003,16 @@ async def collect_livery_photo(message: types.Message, state: FSMContext):
         except:
             pass
     
+    total = len(data['photos'])
+    
+    msg_text = f"📦 Собрано фото: {total}/{LIMITS['livery']}\n"
+    if total == LIMITS['livery']:
+        msg_text += "✅ Лимит достигнут! Нажми Готово"
+    else:
+        msg_text += "Можешь добавить ещё или нажать Готово"
+    
     msg = await message.answer(
-        f"📦 Собрано фото: {len(data['photos'])}/{LIMITS['livery']}\n"
-        "Можешь добавить ещё или нажать Готово",
+        msg_text,
         reply_markup=get_content_keyboard()
     )
     data['msg_id'] = msg.message_id
@@ -1012,23 +1026,30 @@ async def collect_sticker_photo(message: types.Message, state: FSMContext):
         await message.reply("Сначала выбери тип поста через /start")
         return
     
+    # Запрет на видео для наклейки
+    if message.video:
+        await message.reply(
+            "❌ Для наклейки можно отправлять только фото!",
+            reply_markup=get_content_keyboard()
+        )
+        return
+    
     data = temp_data[user_id]
     current_count = len(data.get('photos', []))
     
     # Проверка лимита
     if not check_limit('sticker', current_count + 1):
-        await message.reply(get_limit_text('sticker'))
-        return
-    
-    if message.video:
-        await message.reply("❌ Для наклейки можно отправлять только фото!")
+        await message.reply(
+            f"❌ Для наклейки можно отправить только 1 фото! Нажми Готово или Отмена",
+            reply_markup=get_content_keyboard()
+        )
         return
     
     if message.photo:
         photo = message.photo[-1]
         data['photos'].append(photo.file_id)
-        total = current_count + 1
-        reply_msg = await message.reply(f"✅ Фото добавлено ({total}/{LIMITS['sticker']})")
+        new_count = current_count + 1
+        reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['sticker']})")
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
     if data.get('msg_id'):
@@ -1037,9 +1058,16 @@ async def collect_sticker_photo(message: types.Message, state: FSMContext):
         except:
             pass
     
+    total = len(data['photos'])
+    
+    msg_text = f"📦 Собрано фото: {total}/{LIMITS['sticker']}\n"
+    if total == LIMITS['sticker']:
+        msg_text += "✅ Фото получено! Нажми Готово для продолжения"
+    else:
+        msg_text += "Отправь фото"
+    
     msg = await message.answer(
-        f"📦 Собрано фото: {len(data['photos'])}/{LIMITS['sticker']}\n"
-        "Можешь добавить ещё или нажать Готово",
+        msg_text,
         reply_markup=get_content_keyboard()
     )
     data['msg_id'] = msg.message_id
@@ -1065,7 +1093,10 @@ async def content_done(callback: CallbackQuery, state: FSMContext):
             return
         
         if total != LIMITS['regular']:
-            await callback.answer(f"❌ Нужно отправить ровно {LIMITS['regular']} файла", show_alert=True)
+            await callback.answer(
+                f"❌ Нужно отправить ровно {LIMITS['regular']} файла (сейчас {total})", 
+                show_alert=True
+            )
             return
         
         text = "📋 *Проверь содержимое:*\n\n"
@@ -1073,7 +1104,7 @@ async def content_done(callback: CallbackQuery, state: FSMContext):
             text += f"📸 Фото: {len(data['photos'])}\n"
         if data.get('videos'):
             text += f"🎥 Видео: {len(data['videos'])}\n"
-        text += f"\nВсего: {total}/{LIMITS['regular']}\n"
+        text += f"\n📊 Всего: {total}/{LIMITS['regular']}\n"
         text += "Всё верно?"
         
         await state.set_state(PostStates.confirm_post)
@@ -1085,7 +1116,10 @@ async def content_done(callback: CallbackQuery, state: FSMContext):
             return
         
         if len(data['photos']) != LIMITS['livery']:
-            await callback.answer(f"❌ Нужно отправить ровно {LIMITS['livery']} фото", show_alert=True)
+            await callback.answer(
+                f"❌ Нужно отправить ровно {LIMITS['livery']} фото (сейчас {len(data['photos'])})", 
+                show_alert=True
+            )
             return
         
         await state.set_state(PostStates.waiting_livery_body_file)
@@ -1101,7 +1135,10 @@ async def content_done(callback: CallbackQuery, state: FSMContext):
             return
         
         if len(data['photos']) != LIMITS['sticker']:
-            await callback.answer(f"❌ Нужно отправить ровно {LIMITS['sticker']} фото", show_alert=True)
+            await callback.answer(
+                f"❌ Нужно отправить ровно {LIMITS['sticker']} фото (сейчас {len(data['photos'])})", 
+                show_alert=True
+            )
             return
         
         await state.set_state(PostStates.waiting_sticker_file)
@@ -1532,15 +1569,14 @@ async def show_post_detail(callback: CallbackQuery, post_id: int):
             text += f"📸 Фото: {len(post['content']['photos'])}\n"
         if post['content'].get('videos'):
             text += f"🎥 Видео: {len(post['content']['videos'])}\n"
-        text += f"📊 Всего: {len(post['content'].get('photos', [])) + len(post['content'].get('videos', []))}\n"
+        total_files = len(post['content'].get('photos', [])) + len(post['content'].get('videos', []))
+        text += f"📊 Всего: {total_files}/{LIMITS['regular']}\n"
     elif post['content']['type'] == 'livery':
-        text += f"📸 Фото: {len(post['content']['photos'])}\n"
+        text += f"📸 Фото: {len(post['content']['photos'])}/{LIMITS['livery']}\n"
         text += "📁 Кузов: +1 файл\n📁 Стекло: +1 файл\n"
-        text += f"📊 Всего: {len(post['content']['photos'])} фото + 2 файла"
     elif post['content']['type'] == 'sticker':
-        text += f"📸 Фото: {len(post['content']['photos'])}\n"
+        text += f"📸 Фото: {len(post['content']['photos'])}/{LIMITS['sticker']}\n"
         text += "🏷️ Наклейка: +1 файл\n"
-        text += f"📊 Всего: {len(post['content']['photos'])} фото + 1 файл"
     
     text += f"\n🕐 Создан: {post['created_at'][:16]}"
     
@@ -1849,20 +1885,17 @@ async def scheduler():
         try:
             now = datetime.now()
             
-            # Публикация запланированных постов
             for post in db.posts:
                 if (post['status'] == 'approved' and 
                     post.get('scheduled_time') and
                     datetime.fromisoformat(post['scheduled_time']) <= now):
                     await publish_post(post)
             
-            # Ежедневная публикация в 9:00
             if now.hour == 6 and now.minute == 0:
                 next_post = db.get_next_post()
                 if next_post and not next_post.get('scheduled_time'):
                     await publish_post(next_post)
             
-            # Автоматическая очистка в 3:00
             if now.hour == 3 and now.minute == 0:
                 before = len(db.posts)
                 db.clean_old_posts(30)
