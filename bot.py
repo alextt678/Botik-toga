@@ -289,6 +289,11 @@ class Database:
 
 db = Database()
 
+# ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
 # ==================== ФУНКЦИИ ПРОВЕРКИ ====================
 
 def is_admin(username: Optional[str]) -> bool:
@@ -397,11 +402,6 @@ async def check_active_post(user_id: int, state: FSMContext) -> bool:
         return False
     
     return False
-
-# ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
 
 # ==================== КЛАВИАТУРЫ ====================
 
@@ -2289,7 +2289,18 @@ async def scheduler():
 # ==================== ЗАПУСК ====================
 
 async def on_startup():
+    """Выполняется при запуске бота"""
     os.makedirs(MEDIA_DIR, exist_ok=True)
+    
+    # Запускаем задачи после инициализации бота
+    asyncio.create_task(start_background_tasks())
+    
+    logger.info("Бот запущен")
+
+async def start_background_tasks():
+    """Запускает фоновые задачи после полной инициализации бота"""
+    # Даем боту время полностью инициализироваться
+    await asyncio.sleep(2)
     
     # Запускаем автосохранение
     db.start_auto_save()
@@ -2297,14 +2308,10 @@ async def on_startup():
     # Запускаем очистку временных данных
     asyncio.create_task(clean_temp_data())
     
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook удалён, бот работает в режиме polling")
-    except Exception as e:
-        logger.error(f"Ошибка при удалении вебхука: {e}")
-    
+    # Запускаем планировщик
     asyncio.create_task(scheduler())
     
+    # Отправляем приветственное сообщение админу
     channels = db.get_channels_list()
     if channels:
         current = db.get_current_channel()
@@ -2330,14 +2337,15 @@ async def on_startup():
             )
         except Exception as e:
             logger.error(f"Не удалось отправить приветствие админу: {e}")
-    
-    logger.info("Бот запущен")
 
 async def on_shutdown():
     await db.save()
     logger.info("Бот остановлен")
 
 async def main():
+    # Удаляем вебхук перед запуском
+    await bot.delete_webhook(drop_pending_updates=True)
+    
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
