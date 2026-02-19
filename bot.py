@@ -291,6 +291,7 @@ def get_content_keyboard() -> InlineKeyboardMarkup:
 def get_post_navigation_keyboard(post_id: int, total: int, post_data: Dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     
+    # Кнопки навигации
     nav_row = []
     if post_id > 1:
         nav_row.append(InlineKeyboardButton(text="◀️", callback_data=f"nav_prev_{post_id}"))
@@ -301,6 +302,7 @@ def get_post_navigation_keyboard(post_id: int, total: int, post_data: Dict) -> I
     if nav_row:
         builder.row(*nav_row)
     
+    # Кнопки действий
     builder.row(
         InlineKeyboardButton(text="✅ Одобрить", callback_data=f"nav_approve_{post_id}"),
         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"nav_reject_{post_id}")
@@ -312,8 +314,9 @@ def get_post_navigation_keyboard(post_id: int, total: int, post_data: Dict) -> I
         InlineKeyboardButton(text="📅 Завтра", callback_data=f"nav_sched_{post_id}")
     )
     
+    # Кнопка выхода в админ-меню
     builder.row(
-        InlineKeyboardButton(text="📋 К списку", callback_data="admin_queue"),
+        InlineKeyboardButton(text="🔙 В админ-меню", callback_data="back_to_admin"),
         InlineKeyboardButton(text="🗑️ Удалить пост", callback_data=f"nav_delete_{post_id}")
     )
     
@@ -323,7 +326,8 @@ def get_moderation_keyboard(post_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Одобрить", callback_data=f"approve_{post_id}")
     builder.button(text="❌ Отклонить", callback_data=f"reject_{post_id}")
-    builder.adjust(2)
+    builder.button(text="🔙 В админ-меню", callback_data="back_to_admin")
+    builder.adjust(2, 1)
     return builder.as_markup()
 
 def get_time_keyboard(post_id: int) -> InlineKeyboardMarkup:
@@ -331,6 +335,7 @@ def get_time_keyboard(post_id: int) -> InlineKeyboardMarkup:
     builder.button(text="⏱️ 10 секунд", callback_data=f"time_10sec_{post_id}")
     builder.button(text="⏰ 10 минут", callback_data=f"time_10min_{post_id}")
     builder.button(text="📅 Завтра 9:00", callback_data=f"time_schedule_{post_id}")
+    builder.button(text="🔙 В админ-меню", callback_data="back_to_admin")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -348,7 +353,6 @@ def get_new_post_keyboard() -> InlineKeyboardMarkup:
 async def cancel_post(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     
-    # Очищаем временные данные
     if user_id in temp_data:
         if temp_data[user_id].get('msg_id'):
             try:
@@ -357,16 +361,13 @@ async def cancel_post(callback: CallbackQuery, state: FSMContext):
                 pass
         del temp_data[user_id]
     
-    # Сбрасываем состояние
     await state.clear()
     
-    # Удаляем сообщение с кнопками отмены
     try:
         await callback.message.delete()
     except:
         pass
     
-    # Отправляем НОВОЕ приветственное сообщение с кнопками
     text = (
         "👋 Привет! Что хочешь отправить?\n\n"
         "📤 Обычный пост - фото/видео\n"
@@ -568,7 +569,17 @@ async def back_to_admin(callback: CallbackQuery):
     else:
         text = "🔑 Панель администратора\n⚠️ Канал не выбран!"
     
-    await callback.message.edit_text(text, reply_markup=get_start_keyboard(True))
+    # Если это callback от сообщения с постом, удаляем его
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    
+    await bot.send_message(
+        callback.from_user.id,
+        text,
+        reply_markup=get_start_keyboard(True)
+    )
     await callback.answer()
 
 # ==================== УПРАВЛЕНИЕ ОЧИСТКОЙ ====================
@@ -1299,8 +1310,13 @@ async def show_post_detail(callback: CallbackQuery, post_id: int):
     
     text += f"\n🕐 Создан: {post['created_at'][:16]}"
     
-    await callback.message.delete()
+    # Удаляем предыдущее сообщение
+    try:
+        await callback.message.delete()
+    except:
+        pass
     
+    # Отправляем первый файл как превью с навигацией
     if post['content'].get('photos'):
         await bot.send_photo(
             callback.from_user.id,
@@ -1314,6 +1330,14 @@ async def show_post_detail(callback: CallbackQuery, post_id: int):
             callback.from_user.id,
             post['content']['videos'][0],
             caption=text,
+            parse_mode='Markdown',
+            reply_markup=get_post_navigation_keyboard(post_id, total, post)
+        )
+    else:
+        # Если нет ни фото ни видео, просто отправляем текст
+        await bot.send_message(
+            callback.from_user.id,
+            text,
             parse_mode='Markdown',
             reply_markup=get_post_navigation_keyboard(post_id, total, post)
         )
