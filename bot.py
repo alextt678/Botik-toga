@@ -491,7 +491,7 @@ def error_handler(func):
 
 @dp.callback_query(F.data == "cancel_post")
 @error_handler
-async def cancel_post(callback: CallbackQuery, state: FSMContext):
+async def cancel_post(callback: CallbackQuery, state: FSMContext, **kwargs):
     user_id = callback.from_user.id
     
     if user_id in temp_data:
@@ -529,7 +529,7 @@ async def cancel_post(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(Command("start"))
 @error_handler
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, **kwargs):
     user = message.from_user
     admin_user = is_admin(user.username)
     
@@ -553,7 +553,7 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("clean"))
 @error_handler
-async def cmd_clean(message: types.Message):
+async def cmd_clean(message: types.Message, **kwargs):
     if not is_admin(message.from_user.username):
         await message.answer("⛔ Доступ запрещён")
         return
@@ -564,7 +564,7 @@ async def cmd_clean(message: types.Message):
 
 @dp.callback_query(F.data == "manage_channels")
 @error_handler
-async def manage_channels(callback: CallbackQuery):
+async def manage_channels(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -581,7 +581,7 @@ async def manage_channels(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "add_channel")
 @error_handler
-async def add_channel_start(callback: CallbackQuery):
+async def add_channel_start(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -603,7 +603,7 @@ async def add_channel_start(callback: CallbackQuery):
 
 @dp.message(F.text)
 @error_handler
-async def handle_channel_input(message: types.Message):
+async def handle_channel_input(message: types.Message, **kwargs):
     user_id = message.from_user.id
     
     if user_id in temp_channel_add and is_admin(message.from_user.username):
@@ -648,7 +648,7 @@ async def handle_channel_input(message: types.Message):
 
 @dp.callback_query(F.data.startswith("select_channel_"))
 @error_handler
-async def select_channel(callback: CallbackQuery):
+async def select_channel(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -677,7 +677,7 @@ async def select_channel(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("set_current_"))
 @error_handler
-async def set_current_channel(callback: CallbackQuery):
+async def set_current_channel(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -693,7 +693,7 @@ async def set_current_channel(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("delete_channel_"))
 @error_handler
-async def delete_channel(callback: CallbackQuery):
+async def delete_channel(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -708,7 +708,7 @@ async def delete_channel(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "back_to_admin")
 @error_handler
-async def back_to_admin(callback: CallbackQuery):
+async def back_to_admin(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -735,7 +735,7 @@ async def back_to_admin(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "clean_menu")
 @error_handler
-async def clean_menu(callback: CallbackQuery):
+async def clean_menu(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -745,7 +745,7 @@ async def clean_menu(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "clean_published")
 @error_handler
-async def clean_published(callback: CallbackQuery):
+async def clean_published(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -764,7 +764,7 @@ async def clean_published(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "clean_30days")
 @error_handler
-async def clean_30days(callback: CallbackQuery):
+async def clean_30days(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -783,7 +783,7 @@ async def clean_30days(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "clean_stats")
 @error_handler
-async def clean_stats(callback: CallbackQuery):
+async def clean_stats(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -807,7 +807,7 @@ async def clean_stats(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "new_regular")
 @error_handler
-async def new_regular(callback: CallbackQuery, state: FSMContext):
+async def new_regular(callback: CallbackQuery, state: FSMContext, **kwargs):
     await callback.answer()
     
     if callback.from_user.id in temp_data:
@@ -838,7 +838,7 @@ async def new_regular(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "new_livery")
 @error_handler
-async def new_livery(callback: CallbackQuery, state: FSMContext):
+async def new_livery(callback: CallbackQuery, state: FSMContext, **kwargs):
     await callback.answer()
     
     if callback.from_user.id in temp_data:
@@ -872,7 +872,7 @@ async def new_livery(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "new_sticker")
 @error_handler
-async def new_sticker(callback: CallbackQuery, state: FSMContext):
+async def new_sticker(callback: CallbackQuery, state: FSMContext, **kwargs):
     await callback.answer()
     
     if callback.from_user.id in temp_data:
@@ -906,7 +906,7 @@ async def new_sticker(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(PostStates.collecting_media, F.photo | F.video)
 @error_handler
-async def collect_regular_media(message: types.Message, state: FSMContext):
+async def collect_regular_media(message: types.Message, state: FSMContext, **kwargs):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
@@ -964,7 +964,7 @@ async def collect_regular_media(message: types.Message, state: FSMContext):
 
 @dp.message(PostStates.collecting_livery_photo, F.photo)
 @error_handler
-async def collect_livery_photo(message: types.Message, state: FSMContext):
+async def collect_livery_photo(message: types.Message, state: FSMContext, **kwargs):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
@@ -1017,7 +1017,7 @@ async def collect_livery_photo(message: types.Message, state: FSMContext):
 
 @dp.message(PostStates.collecting_sticker_photo, F.photo)
 @error_handler
-async def collect_sticker_photo(message: types.Message, state: FSMContext):
+async def collect_sticker_photo(message: types.Message, state: FSMContext, **kwargs):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
@@ -1072,7 +1072,7 @@ async def collect_sticker_photo(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "content_done")
 @error_handler
-async def content_done(callback: CallbackQuery, state: FSMContext):
+async def content_done(callback: CallbackQuery, state: FSMContext, **kwargs):
     user_id = callback.from_user.id
     current_state = await state.get_state()
     
@@ -1150,7 +1150,7 @@ async def content_done(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_send")
 @error_handler
-async def confirm_send(callback: CallbackQuery, state: FSMContext):
+async def confirm_send(callback: CallbackQuery, state: FSMContext, **kwargs):
     user_id = callback.from_user.id
     
     if user_id not in temp_data:
@@ -1209,7 +1209,7 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_redo")
 @error_handler
-async def confirm_redo(callback: CallbackQuery, state: FSMContext):
+async def confirm_redo(callback: CallbackQuery, state: FSMContext, **kwargs):
     user_id = callback.from_user.id
     
     if user_id not in temp_data:
@@ -1249,7 +1249,7 @@ async def confirm_redo(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(PostStates.waiting_livery_body_file, F.document)
 @error_handler
-async def get_livery_body_file(message: types.Message, state: FSMContext):
+async def get_livery_body_file(message: types.Message, state: FSMContext, **kwargs):
     user_id = message.from_user.id
     
     if not message.document:
@@ -1275,7 +1275,7 @@ async def get_livery_body_file(message: types.Message, state: FSMContext):
 
 @dp.message(PostStates.waiting_livery_glass_file, F.document)
 @error_handler
-async def get_livery_glass_file(message: types.Message, state: FSMContext):
+async def get_livery_glass_file(message: types.Message, state: FSMContext, **kwargs):
     user_id = message.from_user.id
     
     if not message.document:
@@ -1306,7 +1306,7 @@ async def get_livery_glass_file(message: types.Message, state: FSMContext):
 
 @dp.message(PostStates.waiting_sticker_file, F.document)
 @error_handler
-async def get_sticker_file(message: types.Message, state: FSMContext):
+async def get_sticker_file(message: types.Message, state: FSMContext, **kwargs):
     user_id = message.from_user.id
     
     if not message.document:
@@ -1473,7 +1473,7 @@ async def publish_post(post: Dict):
 
 @dp.callback_query(F.data == "admin_queue")
 @error_handler
-async def show_queue(callback: CallbackQuery):
+async def show_queue(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1616,7 +1616,7 @@ async def show_post_detail(callback: CallbackQuery, post_id: int):
 
 @dp.callback_query(F.data.startswith("view_post_"))
 @error_handler
-async def view_post(callback: CallbackQuery):
+async def view_post(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1626,7 +1626,7 @@ async def view_post(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("nav_"))
 @error_handler
-async def navigation_handler(callback: CallbackQuery):
+async def navigation_handler(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1748,7 +1748,7 @@ async def set_time_logic(callback: CallbackQuery, post_id: int, time_type: str):
 
 @dp.callback_query(F.data.startswith("approve_"))
 @error_handler
-async def approve_post(callback: CallbackQuery):
+async def approve_post(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1775,7 +1775,7 @@ async def approve_post(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("reject_"))
 @error_handler
-async def reject_post(callback: CallbackQuery):
+async def reject_post(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1803,7 +1803,7 @@ async def reject_post(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("time_"))
 @error_handler
-async def set_time(callback: CallbackQuery):
+async def set_time(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1848,7 +1848,7 @@ async def set_time(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_stats")
 @error_handler
-async def show_stats(callback: CallbackQuery):
+async def show_stats(callback: CallbackQuery, **kwargs):
     if not is_admin(callback.from_user.username):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
@@ -1871,7 +1871,7 @@ async def show_stats(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "no_action")
 @error_handler
-async def no_action(callback: CallbackQuery):
+async def no_action(callback: CallbackQuery, **kwargs):
     await callback.answer()
 
 # ==================== ПЛАНИРОВЩИК ====================
