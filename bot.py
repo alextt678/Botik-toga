@@ -348,6 +348,7 @@ def get_new_post_keyboard() -> InlineKeyboardMarkup:
 async def cancel_post(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     
+    # Очищаем временные данные
     if user_id in temp_data:
         if temp_data[user_id].get('msg_id'):
             try:
@@ -356,9 +357,16 @@ async def cancel_post(callback: CallbackQuery, state: FSMContext):
                 pass
         del temp_data[user_id]
     
+    # Сбрасываем состояние
     await state.clear()
     
-    # Отправляем приветственное сообщение с кнопками
+    # Удаляем сообщение с кнопками отмены
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    
+    # Отправляем НОВОЕ приветственное сообщение с кнопками
     text = (
         "👋 Привет! Что хочешь отправить?\n\n"
         "📤 Обычный пост - фото/видео\n"
@@ -366,8 +374,14 @@ async def cancel_post(callback: CallbackQuery, state: FSMContext):
         "🏷️ Наклейка - фото + 1 файл (.txt)\n\n"
         "⚠️ Файлы должны быть в формате .txt"
     )
-    await callback.message.edit_text(text, reply_markup=get_start_keyboard(False))
-    await callback.answer()
+    
+    await bot.send_message(
+        user_id,
+        text,
+        reply_markup=get_start_keyboard(False)
+    )
+    
+    await callback.answer("❌ Создание поста отменено")
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
@@ -1051,9 +1065,16 @@ async def get_sticker_file(message: types.Message, state: FSMContext):
 
 async def send_new_post_button(user_id: int):
     try:
+        text = (
+            "👋 Привет! Что хочешь отправить?\n\n"
+            "📤 Обычный пост - фото/видео\n"
+            "👕 Ливрея - фото + 2 файла (.txt) на кузов и стекло\n"
+            "🏷️ Наклейка - фото + 1 файл (.txt)\n\n"
+            "⚠️ Файлы должны быть в формате .txt"
+        )
         await bot.send_message(
             user_id,
-            "✨ Твой пост обработан! Что хочешь отправить? 👇",
+            text,
             reply_markup=get_new_post_keyboard()
         )
     except Exception as e:
