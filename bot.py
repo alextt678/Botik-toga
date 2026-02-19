@@ -831,7 +831,7 @@ async def new_regular(callback: CallbackQuery, state: FSMContext, **kwargs):
     msg = await callback.message.answer(
         "📤 Отправляй фото или видео (максимум 4 файла)\n"
         "Можно отправить несколько файлов одним сообщением\n"
-        "Когда соберёшь 4 файла - нажми Готово",
+        "Когда закончишь добавлять файлы - нажми Готово",
         reply_markup=get_content_keyboard()
     )
     temp_data[callback.from_user.id]['msg_id'] = msg.message_id
@@ -863,7 +863,7 @@ async def new_livery(callback: CallbackQuery, state: FSMContext, **kwargs):
     msg = await callback.message.answer(
         "👕 Создание ливреи\n\n"
         "1. Отправь фото ливреи (максимум 4 фото, видео нельзя)\n"
-        "2. Когда соберёшь 4 фото - нажми Готово\n"
+        "2. Когда закончишь добавлять фото - нажми Готово\n"
         "3. Затем отправь файлы .txt\n\n"
         "⚠️ Файлы должны быть строго в формате .txt",
         reply_markup=get_content_keyboard()
@@ -993,7 +993,7 @@ async def collect_regular_media(message: types.Message, state: FSMContext, album
     
     msg_text = f"📦 Собрано: {total}/{LIMITS['regular']} файлов\n"
     if total == LIMITS['regular']:
-        msg_text += "✅ Лимит достигнут! Нажми Готово"
+        msg_text += "✅ Лимит достигнут! Больше добавить нельзя. Нажми Готово"
     else:
         msg_text += "Можешь добавить ещё или нажать Готово"
     
@@ -1074,7 +1074,7 @@ async def collect_livery_photo(message: types.Message, state: FSMContext, album:
     
     msg_text = f"📦 Собрано фото: {total}/{LIMITS['livery']}\n"
     if total == LIMITS['livery']:
-        msg_text += "✅ Лимит достигнут! Нажми Готово"
+        msg_text += "✅ Лимит достигнут! Больше добавить нельзя. Нажми Готово"
     else:
         msg_text += "Можешь добавить ещё или нажать Готово"
     
@@ -1185,13 +1185,7 @@ async def content_done(callback: CallbackQuery, state: FSMContext, **kwargs):
             await callback.answer("❌ Сначала отправь файлы", show_alert=True)
             return
         
-        if total != LIMITS['regular']:
-            await callback.answer(
-                f"❌ Нужно отправить ровно {LIMITS['regular']} файла (сейчас {total})", 
-                show_alert=True
-            )
-            return
-        
+        # Убрали проверку на строгое количество файлов
         text = "📋 *Проверь содержимое:*\n\n"
         if data.get('photos'):
             text += f"📸 Фото: {len(data['photos'])}\n"
@@ -1208,13 +1202,7 @@ async def content_done(callback: CallbackQuery, state: FSMContext, **kwargs):
             await callback.answer("❌ Сначала отправь фото", show_alert=True)
             return
         
-        if len(data['photos']) != LIMITS['livery']:
-            await callback.answer(
-                f"❌ Нужно отправить ровно {LIMITS['livery']} фото (сейчас {len(data['photos'])})", 
-                show_alert=True
-            )
-            return
-        
+        # Убрали проверку на строгое количество фото
         await state.set_state(PostStates.waiting_livery_body_file)
         await callback.message.edit_text(
             "📁 Отправь файл на КУЗОВ (только .txt)\n"
@@ -1229,7 +1217,7 @@ async def content_done(callback: CallbackQuery, state: FSMContext, **kwargs):
         
         if len(data['photos']) != LIMITS['sticker']:
             await callback.answer(
-                f"❌ Нужно отправить ровно {LIMITS['sticker']} фото (сейчас {len(data['photos'])})", 
+                f"❌ Для наклейки нужно ровно {LIMITS['sticker']} фото (сейчас {len(data['photos'])})", 
                 show_alert=True
             )
             return
