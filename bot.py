@@ -51,6 +51,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ==================== СОСТОЯНИЯ ДЛЯ FSM ====================
+class PostStates(StatesGroup):
+    collecting_media = State()
+    collecting_livery_photo = State()
+    waiting_livery_body_file = State()
+    waiting_livery_glass_file = State()
+    collecting_sticker_photo = State()
+    waiting_sticker_file = State()
+    confirm_post = State()
+
 # ==================== БАЗА ДАННЫХ ====================
 DB_FILE = "posts.json"
 CHANNELS_FILE = "channels.json"
@@ -65,7 +75,6 @@ class Database:
         self.current_channel: Optional[str] = None
         self.last_save = datetime.now()
         self.load()
-        # УБИРАЕМ create_task отсюда - он вызовет ошибку до запуска event loop
     
     def start_auto_save(self):
         """Запускает автосохранение (вызывать после запуска event loop)"""
@@ -119,7 +128,7 @@ class Database:
     async def auto_save(self):
         """Автоматическое сохранение каждые 5 минут"""
         while True:
-            await asyncio.sleep(300)  # 5 минут
+            await asyncio.sleep(300)
             await self.save()
     
     async def create_backup(self):
@@ -1906,7 +1915,7 @@ async def scheduler():
 async def on_startup():
     os.makedirs(MEDIA_DIR, exist_ok=True)
     
-    # Запускаем автосохранение ТОЛЬКО после запуска event loop
+    # Запускаем автосохранение
     db.start_auto_save()
     
     # Запускаем очистку временных данных
