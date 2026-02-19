@@ -31,9 +31,9 @@ LIMITS = {
 
 # Тексты для лимитов
 LIMIT_TEXTS = {
-    'regular': "⚠️ Для обычного поста можно отправить не более 4 файлов (фото/видео)",
-    'livery': "⚠️ Для ливреи можно отправить не более 4 фото (видео нельзя)",
-    'sticker': "⚠️ Для наклейки можно отправить только 1 фото (видео нельзя)"
+    'regular': "⚠️ Максимум 4 файла! Нельзя отправить больше 4 файлов (фото/видео)",
+    'livery': "⚠️ Максимум 4 фото! Нельзя отправить больше 4 фото",
+    'sticker': "⚠️ Только 1 фото! Нельзя отправить больше 1 фото"
 }
 
 MAX_QUEUE_SIZE = 100
@@ -298,9 +298,9 @@ async def check_bot_in_channel(channel_id: str) -> bool:
 def is_txt_file(file_name: str) -> bool:
     return file_name and file_name.lower().endswith('.txt')
 
-def check_limit(post_type: str, current_count: int) -> bool:
+def check_limit(post_type: str, current_count: int, additional: int = 1) -> bool:
     limit = LIMITS.get(post_type, 4)
-    return current_count < limit
+    return (current_count + additional) <= limit
 
 def get_limit_text(post_type: str) -> str:
     return LIMIT_TEXTS.get(post_type, "⚠️ Превышен лимит файлов")
@@ -904,9 +904,9 @@ async def new_sticker(callback: CallbackQuery, state: FSMContext, **kwargs):
 
 # ==================== СБОР МЕДИА ====================
 
-@dp.message(PostStates.collecting_media, F.photo | F.video)
+@dp.message(PostStates.collecting_media, F.photo | F.video | F.media_group)
 @error_handler
-async def collect_regular_media(message: types.Message, state: FSMContext, **kwargs):
+async def collect_regular_media(message: types.Message, state: FSMContext, album: List[types.Message] = None, **kwargs):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
@@ -916,32 +916,73 @@ async def collect_regular_media(message: types.Message, state: FSMContext, **kwa
     data = temp_data[user_id]
     current_count = len(data.get('photos', [])) + len(data.get('videos', []))
     
-    if not check_limit('regular', current_count + 1):
-        await message.reply(
-            f"❌ Лимит {LIMITS['regular']} файла! Нажми Готово или Отмена",
-            reply_markup=get_content_keyboard()
+    # Если это альбом (несколько фото/видео в одном сообщении)
+    if album:
+        total_in_album = len(album)
+        if not check_limit('regular', current_count, total_in_album):
+            await message.reply(
+                f"❌ Нельзя добавить {total_in_album} файлов! "
+                f"Лимит {LIMITS['regular']} файла, уже есть {current_count}. "
+                f"Можно добавить максимум {LIMITS['regular'] - current_count}.",
+                reply_markup=get_content_keyboard()
+            )
+            return
+        
+        added_photos = 0
+        added_videos = 0
+        
+        for msg in album:
+            if msg.photo:
+                photo = msg.photo[-1]
+                data['photos'].append(photo.file_id)
+                added_photos += 1
+            elif msg.video:
+                data['videos'].append(msg.video.file_id)
+                added_videos += 1
+        
+        new_count = current_count + added_photos + added_videos
+        reply_msg = await message.reply(
+            f"✅ Добавлено файлов: {added_photos + added_videos} "
+            f"({new_count}/{LIMITS['regular']})"
         )
-        return
-    
-    added = False
-    file_type = ""
-    
-    if message.photo:
-        photo = message.photo[-1]
-        data['photos'].append(photo.file_id)
-        added = True
-        file_type = "фото"
-    
-    elif message.video:
-        data['videos'].append(message.video.file_id)
-        added = True
-        file_type = "видео"
-    
-    if added:
-        new_count = current_count + 1
-        reply_msg = await message.reply(f"✅ {file_type} добавлено ({new_count}/{LIMITS['regular']})")
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
+    # Если это одиночное сообщение
+    else:
+        added = False
+        file_type = ""
+        
+        if message.photo:
+            if not check_limit('regular', current_count):
+                await message.reply(
+                    f"❌ Лимит {LIMITS['regular']} файла! Нельзя добавить больше.",
+                    reply_markup=get_content_keyboard()
+                )
+                return
+            
+            photo = message.photo[-1]
+            data['photos'].append(photo.file_id)
+            added = True
+            file_type = "фото"
+        
+        elif message.video:
+            if not check_limit('regular', current_count):
+                await message.reply(
+                    f"❌ Лимит {LIMITS['regular']} файла! Нельзя добавить больше.",
+                    reply_markup=get_content_keyboard()
+                )
+                return
+            
+            data['videos'].append(message.video.file_id)
+            added = True
+            file_type = "видео"
+        
+        if added:
+            new_count = current_count + 1
+            reply_msg = await message.reply(f"✅ {file_type} добавлено ({new_count}/{LIMITS['regular']})")
+            asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
+    
+    # Обновляем сообщение с прогрессом
     if data.get('msg_id'):
         try:
             await bot.delete_message(user_id, data['msg_id'])
@@ -962,9 +1003,9 @@ async def collect_regular_media(message: types.Message, state: FSMContext, **kwa
     )
     data['msg_id'] = msg.message_id
 
-@dp.message(PostStates.collecting_livery_photo, F.photo)
+@dp.message(PostStates.collecting_livery_photo, F.photo | F.media_group)
 @error_handler
-async def collect_livery_photo(message: types.Message, state: FSMContext, **kwargs):
+async def collect_livery_photo(message: types.Message, state: FSMContext, album: List[types.Message] = None, **kwargs):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
@@ -981,20 +1022,48 @@ async def collect_livery_photo(message: types.Message, state: FSMContext, **kwar
     data = temp_data[user_id]
     current_count = len(data.get('photos', []))
     
-    if not check_limit('livery', current_count + 1):
-        await message.reply(
-            f"❌ Лимит {LIMITS['livery']} фото! Нажми Готово или Отмена",
-            reply_markup=get_content_keyboard()
+    # Если это альбом (несколько фото в одном сообщении)
+    if album:
+        total_in_album = len(album)
+        if not check_limit('livery', current_count, total_in_album):
+            await message.reply(
+                f"❌ Нельзя добавить {total_in_album} фото! "
+                f"Лимит {LIMITS['livery']} фото, уже есть {current_count}. "
+                f"Можно добавить максимум {LIMITS['livery'] - current_count}.",
+                reply_markup=get_content_keyboard()
+            )
+            return
+        
+        added_photos = 0
+        for msg in album:
+            if msg.photo:
+                photo = msg.photo[-1]
+                data['photos'].append(photo.file_id)
+                added_photos += 1
+        
+        new_count = current_count + added_photos
+        reply_msg = await message.reply(
+            f"✅ Добавлено фото: {added_photos} ({new_count}/{LIMITS['livery']})"
         )
-        return
-    
-    if message.photo:
-        photo = message.photo[-1]
-        data['photos'].append(photo.file_id)
-        new_count = current_count + 1
-        reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['livery']})")
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
+    # Если это одиночное сообщение
+    else:
+        if message.photo:
+            if not check_limit('livery', current_count):
+                await message.reply(
+                    f"❌ Лимит {LIMITS['livery']} фото! Нельзя добавить больше.",
+                    reply_markup=get_content_keyboard()
+                )
+                return
+            
+            photo = message.photo[-1]
+            data['photos'].append(photo.file_id)
+            new_count = current_count + 1
+            reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['livery']})")
+            asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
+    
+    # Обновляем сообщение с прогрессом
     if data.get('msg_id'):
         try:
             await bot.delete_message(user_id, data['msg_id'])
@@ -1015,9 +1084,9 @@ async def collect_livery_photo(message: types.Message, state: FSMContext, **kwar
     )
     data['msg_id'] = msg.message_id
 
-@dp.message(PostStates.collecting_sticker_photo, F.photo)
+@dp.message(PostStates.collecting_sticker_photo, F.photo | F.media_group)
 @error_handler
-async def collect_sticker_photo(message: types.Message, state: FSMContext, **kwargs):
+async def collect_sticker_photo(message: types.Message, state: FSMContext, album: List[types.Message] = None, **kwargs):
     user_id = message.from_user.id
     
     if user_id not in temp_data:
@@ -1034,20 +1103,48 @@ async def collect_sticker_photo(message: types.Message, state: FSMContext, **kwa
     data = temp_data[user_id]
     current_count = len(data.get('photos', []))
     
-    if not check_limit('sticker', current_count + 1):
-        await message.reply(
-            f"❌ Для наклейки можно отправить только 1 фото! Нажми Готово или Отмена",
-            reply_markup=get_content_keyboard()
-        )
-        return
-    
-    if message.photo:
-        photo = message.photo[-1]
-        data['photos'].append(photo.file_id)
+    # Если это альбом (несколько фото в одном сообщении)
+    if album:
+        total_in_album = len(album)
+        if not check_limit('sticker', current_count, total_in_album):
+            await message.reply(
+                f"❌ Нельзя добавить {total_in_album} фото! "
+                f"Для наклейки нужно только 1 фото. "
+                f"Уже есть {current_count}.",
+                reply_markup=get_content_keyboard()
+            )
+            return
+        
+        # Добавляем только первое фото из альбома
+        for msg in album[:1]:
+            if msg.photo:
+                photo = msg.photo[-1]
+                data['photos'].append(photo.file_id)
+                break
+        
         new_count = current_count + 1
-        reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['sticker']})")
+        reply_msg = await message.reply(
+            f"✅ Фото добавлено ({new_count}/{LIMITS['sticker']})"
+        )
         asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
     
+    # Если это одиночное сообщение
+    else:
+        if message.photo:
+            if not check_limit('sticker', current_count):
+                await message.reply(
+                    f"❌ Для наклейки нужно только 1 фото! Нельзя добавить больше.",
+                    reply_markup=get_content_keyboard()
+                )
+                return
+            
+            photo = message.photo[-1]
+            data['photos'].append(photo.file_id)
+            new_count = current_count + 1
+            reply_msg = await message.reply(f"✅ Фото добавлено ({new_count}/{LIMITS['sticker']})")
+            asyncio.create_task(delete_message_after(reply_msg.chat.id, reply_msg.message_id, 3))
+    
+    # Обновляем сообщение с прогрессом
     if data.get('msg_id'):
         try:
             await bot.delete_message(user_id, data['msg_id'])
