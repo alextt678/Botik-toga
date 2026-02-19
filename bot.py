@@ -358,13 +358,239 @@ async def cmd_clean(message: types.Message):
     
     await message.answer("🧹 Меню очистки:", reply_markup=get_clean_keyboard())
 
+# ==================== УПРАВЛЕНИЕ КАНАЛАМИ ====================
+
+@dp.callback_query(F.data == "manage_channels")
+async def manage_channels(callback: CallbackQuery):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    channels = db.get_channels_list()
+    
+    if not channels:
+        text = "📢 У вас нет добавленных каналов.\nНажмите 'Добавить канал' и отправьте ссылку или ID канала."
+    else:
+        text = "📢 Список каналов:\n✅ - текущий канал для публикаций"
+    
+    await callback.message.edit_text(text, reply_markup=get_channels_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "add_channel")
+async def add_channel_start(callback: CallbackQuery):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    temp_channel_add[callback.from_user.id] = True
+    
+    await callback.message.edit_text(
+        "📝 Отправьте ссылку на канал или его ID\n"
+        "Примеры:\n"
+        "- @moy_kanal\n"
+        "- -1001234567890\n"
+        "- https://t.me/moy_kanal\n\n"
+        "❗️ Бот должен быть администратором канала!",
+        reply_markup=InlineKeyboardBuilder()
+            .button(text="◀️ Отмена", callback_data="manage_channels")
+            .as_markup()
+    )
+    await callback.answer()
+
+# ==================== ОБРАБОТЧИКИ ТЕКСТА ====================
+
+temp_channel_add = {}
+
+@dp.message(F.text)
+async def handle_channel_input(message: types.Message):
+    user_id = message.from_user.id
+    
+    if user_id in temp_channel_add and is_admin(message.from_user.username):
+        channel_input = message.text.strip()
+        
+        if 't.me/' in channel_input:
+            channel_input = channel_input.split('t.me/')[-1].split('/')[0]
+            if not channel_input.startswith('@'):
+                channel_input = '@' + channel_input
+        
+        status = await check_bot_in_channel(channel_input)
+        
+        if status:
+            try:
+                chat = await bot.get_chat(channel_input)
+                title = chat.title
+            except:
+                title = channel_input
+            
+            db.add_channel(channel_input, title)
+            
+            if len(db.get_channels_list()) == 1:
+                db.set_current_channel(channel_input)
+            
+            await db.save()
+            
+            await message.answer(
+                f"✅ Канал {title} успешно добавлен!",
+                reply_markup=get_channels_keyboard()
+            )
+        else:
+            await message.answer(
+                "❌ Не удалось добавить канал.\n"
+                "Проверьте:\n"
+                "1. Бот является администратором канала\n"
+                "2. Ссылка или ID правильные\n"
+                "3. Канал существует",
+                reply_markup=get_channels_keyboard()
+            )
+        
+        del temp_channel_add[user_id]
+
+@dp.callback_query(F.data.startswith("select_channel_"))
+async def select_channel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    channel_id = callback.data.replace("select_channel_", "")
+    
+    channel = None
+    for ch in db.get_channels_list():
+        if ch['id'] == channel_id:
+            channel = ch
+            break
+    
+    if not channel:
+        await callback.answer("❌ Канал не найден", show_alert=True)
+        return
+    
+    text = f"📢 Канал: {channel.get('title', channel['id'])}\n"
+    text += f"ID: {channel['id']}\n"
+    text += f"Добавлен: {channel.get('added_at', 'неизвестно')[:16]}\n"
+    
+    if channel_id == db.current_channel:
+        text += "\n✅ Это текущий канал для публикаций"
+    
+    await callback.message.edit_text(text, reply_markup=get_channel_actions_keyboard(channel_id))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("set_current_"))
+async def set_current_channel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    channel_id = callback.data.replace("set_current_", "")
+    
+    if db.set_current_channel(channel_id):
+        await db.save()
+        await callback.answer("✅ Текущий канал изменён")
+        await manage_channels(callback)
+    else:
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@dp.callback_query(F.data.startswith("delete_channel_"))
+async def delete_channel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    channel_id = callback.data.replace("delete_channel_", "")
+    
+    db.remove_channel(channel_id)
+    await db.save()
+    
+    await callback.answer("✅ Канал удалён")
+    await manage_channels(callback)
+
+@dp.callback_query(F.data == "back_to_admin")
+async def back_to_admin(callback: CallbackQuery):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    current = db.get_current_channel()
+    if current:
+        text = f"🔑 Панель администратора\n📢 Текущий канал: {current.get('title', current['id'])}"
+    else:
+        text = "🔑 Панель администратора\n⚠️ Канал не выбран!"
+    
+    await callback.message.edit_text(text, reply_markup=get_start_keyboard(True))
+    await callback.answer()
+
+# ==================== УПРАВЛЕНИЕ ОЧИСТКОЙ ====================
+
+@dp.callback_query(F.data == "clean_menu")
+async def clean_menu(callback: CallbackQuery):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    await callback.message.edit_text("🧹 Меню очистки:", reply_markup=get_clean_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "clean_published")
+async def clean_published(callback: CallbackQuery):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    before = len(db.posts)
+    db.clean_published_posts()
+    await db.save()
+    after = len(db.posts)
+    
+    await callback.message.edit_text(
+        f"🧹 Удалено опубликованных постов: {before - after}\n"
+        f"📊 Осталось записей: {after}",
+        reply_markup=get_clean_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "clean_30days")
+async def clean_30days(callback: CallbackQuery):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    before = len(db.posts)
+    db.clean_old_posts(30)
+    await db.save()
+    after = len(db.posts)
+    
+    await callback.message.edit_text(
+        f"🧹 Удалено записей старше 30 дней: {before - after}\n"
+        f"📊 Осталось записей: {after}",
+        reply_markup=get_clean_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "clean_stats")
+async def clean_stats(callback: CallbackQuery):
+    if not is_admin(callback.from_user.username):
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    
+    stats = db.get_stats()
+    
+    text = "📊 *Статистика базы данных:*\n\n"
+    text += f"📝 Всего записей: {stats['total']}\n"
+    text += f"⏳ На модерации: {stats['pending']}\n"
+    text += f"✅ Одобрено: {stats['approved']}\n"
+    text += f"📢 Опубликовано: {stats['published']}\n"
+    
+    if stats['oldest']:
+        text += f"\n🕐 Самая старая запись: {stats['oldest'].strftime('%d.%m.%Y')}\n"
+        text += f"🕐 Самая новая запись: {stats['newest'].strftime('%d.%m.%Y')}"
+    
+    await callback.message.edit_text(text, parse_mode='Markdown', reply_markup=get_clean_keyboard())
+    await callback.answer()
+
 # ==================== НАЧАЛО СОЗДАНИЯ ПОСТОВ ====================
 
 @dp.callback_query(F.data == "new_regular")
 async def new_regular(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     
-    # Проверяем, нет ли уже активного поста
     if callback.from_user.id in temp_data:
         await callback.message.answer("⏳ Сначала дождись проверки предыдущего поста!")
         return
@@ -1145,8 +1371,9 @@ async def show_stats(callback: CallbackQuery):
     await callback.message.edit_text(text, parse_mode='Markdown', reply_markup=get_start_keyboard(True))
     await callback.answer()
 
-# ==================== УПРАВЛЕНИЕ КАНАЛАМИ (СОКРАЩЕНО ДЛЯ ОБЪЁМА) ====================
-# ... (весь код управления каналами из предыдущей версии остаётся без изменений)
+@dp.callback_query(F.data == "no_action")
+async def no_action(callback: CallbackQuery):
+    await callback.answer()
 
 # ==================== ПЛАНИРОВЩИК ====================
 
